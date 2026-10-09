@@ -582,8 +582,8 @@ export const register: Register = on => {
         <Text> </Text>
         <Text bold>
           {rows.length === 0
-            ? 'Agents · none yet'
-            : `Agents · ${rows.length} total · ${running} active`}
+            ? 'Subagents · none yet'
+            : `Subagents · ${rows.length} total · ${running} active`}
         </Text>
         {blocks}
         <Text> </Text>

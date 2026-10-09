@@ -170,6 +170,7 @@ test('the pane lists a subagent with its tools, status and token usage', async (
       view: {},
     },
   } as never)
+  expect(await pane.find({ type: 'Text', text: /Subagents · 1 total · 1 active/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /Explore \(find hooks\)/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /abcdef12 · running · haiku-5-5 · effort high/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /haiku-5-5 · effort high/ })).toBeDefined()
