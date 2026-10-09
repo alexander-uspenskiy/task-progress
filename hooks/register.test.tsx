@@ -93,8 +93,8 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('tool.call', () => ({ result: { text: 'ok' } }) as never)
   on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
-  on('turn.step', async function* () {
-    return { turnId: 'x', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
   })
   on('agent.list', () =>
     ({
@@ -113,6 +113,25 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   } as never)) {
     // drain the stream: the hook runs as the stream is read
   }
+  for await (const _chunk of $.turn.step({
+    turnId: 'm',
+    index: 0,
+    model: 'claude-opus-5-5',
+    effort: 'xhigh',
+    messageCount: 1,
+  } as never)) {
+    // drain
+  }
+  await $.tool.call({ tool: 'Bash', command: 'npm test', tool_use_id: 'm1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'm2' } as never)
+  await $.turn.complete({
+    answer: 'ok',
+    durationMs: 10,
+    isAborted: false,
+    turnId: 'm',
+    reason: 'answer',
+    usage: { model: 'm', input_tokens: 5000, output_tokens: 700, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  } as never)
   await $.tool.call({
     tool: 'Grep',
     pattern: 'TodoWrite',
@@ -148,5 +167,7 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   expect(await pane.find({ type: 'Text', text: /abcdef12 · haiku-5-5 · effort high · running · 1 tools · 1\.5k tok/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /haiku-5-5 · effort high/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /TodoWrite/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /opus-5-5 · effort xhigh · 2 tools · 5\.7k tok/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Bash×2/ })).toBeDefined()
   await pane.unmount()
 })

@@ -6,6 +6,7 @@ import type { AgentRow, Call, Run, Setup, Todo, Usage } from '../types'
 type Turn = { tools: number; seconds: number }
 
 const PANE = 'task-agents'
+const MAIN = 'main'
 const SEGMENTS = 20
 const TICK_MS = 400
 const TASK_HINT =
@@ -150,6 +151,7 @@ export const register: Register = on => {
     const expectedTools = median(history.map(h => h.tools), 8)
     const expectedSeconds = median(history.map(h => h.seconds), 60)
     await update($, todos, list => list.filter(t => t.status !== 'completed'))
+    await update($, calls, list => list.filter(c => c.agentId !== MAIN))
     await update($, run, () => ({
       startedAt,
       now: startedAt,
@@ -167,22 +169,19 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     await update($, run, r => ({ ...r, tools: r.tools + 1 }))
-    if (e.agentId === undefined) {
-      return next(e)
-    }
-
-    // A subagent's call: log it running, then done or errored with its time.
+    // A call of the main loop or of a subagent: log it running, then done or
+    // errored with its time.
     // The bookkeeping can never throw once the tool has run.
     const call: Call = {
       id: e.tool_use_id,
-      agentId: e.agentId,
+      agentId: e.agentId ?? MAIN,
       tool: String(e.tool),
       hint: hintOf(e),
       status: 'running',
       startedAt: await $.clock.now(),
       ms: 0,
     }
-    await update($, calls, list => [...list, call].slice(-300))
+    await update($, calls, list => [...list, call].slice(-400))
     const ran = await next(e)
     try {
       const ms = (await $.clock.now()) - call.startedAt
@@ -199,21 +198,19 @@ export const register: Register = on => {
   // Each model request of a subagent says which model and effort it runs on.
   // turn.step streams, so the hook is a generator that forwards the stream.
   on('turn.step', async function* ($, e, next) {
-    if (e.agentId !== undefined) {
-      try {
-        const agentId = e.agentId
-        const effort = e.effort === undefined ? '' : String(e.effort)
-        const known = await read($, setups)
-        const now = known.find(x => x.agentId === agentId)
-        if (now === undefined || now.model !== e.model || now.effort !== effort) {
-          await update($, setups, list => [
-            ...list.filter(x => x.agentId !== agentId),
-            { agentId, model: e.model, effort },
-          ])
-        }
-      } catch {
-        // a failed note must not fail the model request
+    try {
+      const agentId = e.agentId ?? MAIN
+      const effort = e.effort === undefined ? '' : String(e.effort)
+      const known = await read($, setups)
+      const now = known.find(x => x.agentId === agentId)
+      if (now === undefined || now.model !== e.model || now.effort !== effort) {
+        await update($, setups, list => [
+          ...list.filter(x => x.agentId !== agentId),
+          { agentId, model: e.model, effort },
+        ])
       }
+    } catch {
+      // a failed note must not fail the model request
     }
     return yield* next(e)
   })
@@ -259,10 +256,10 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
-    // A subagent's turn ends here too: keep what it cost. Only the main loop
-    // ends the run.
-    if (e.agentId !== undefined && e.usage !== undefined) {
-      const agentId = e.agentId
+    // Every turn ends here, a subagent's too: keep what it cost. Only the main
+    // loop's end ends the run.
+    if (e.usage !== undefined) {
+      const agentId = e.agentId ?? MAIN
       const u = e.usage
       await update($, usage, list => {
         const prev = list.find(x => x.agentId === agentId)
@@ -352,47 +349,13 @@ export const register: Register = on => {
     const log = await read($, calls)
     const spent = await read($, usage)
     const configs = await read($, setups)
-    const room = Math.max(4, (e.viewport?.rows ?? 24) - 4)
-
-    if (rows.length === 0) {
-      return <Text dimColor>No subagents yet.</Text>
-    }
-
-    const running = rows.filter(a => !FINISHED.includes(a.status)).length
+    const room = Math.max(6, (e.viewport?.rows ?? 24) - 4)
     const SHOWN_CALLS = 4
 
-    // Newest agent first; each takes a header and its last few tool calls,
-    // until the pane is full.
-    const blocks = []
-    let used = 0
-    for (const a of [...rows].reverse()) {
-      const mine = log.filter(c => c.agentId === a.id)
-      const recent = mine.slice(-SHOWN_CALLS)
-      const need = 1 + recent.length + (mine.length > recent.length ? 1 : 0)
-      if (used + need > room && blocks.length > 0) break
-      used += need
-      const cost = spent.find(x => x.agentId === a.id)
-      const setup = configs.find(x => x.agentId === a.id)
-      const isOver = FINISHED.includes(a.status)
-      blocks.push(
-        <Box key={a.id} flexDirection="column">
-          <Box>
-            <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} </Text>
-            <Text bold dimColor={isOver} wrap="truncate-end">
-              {a.name !== '' ? a.name : a.type}
-              {a.label !== '' && a.label !== a.type ? ` (${a.label})` : ` (${a.type})`}
-            </Text>
-            <Text dimColor>
-              {' '}
-              {a.id.slice(0, 8)}
-              {setup === undefined ? '' : ` · ${shortModel(setup.model)}`}
-              {setup === undefined || setup.effort === '' ? '' : ` · effort ${setup.effort}`} ·{' '}
-              {a.status} · {mine.length} tools
-              {cost === undefined
-                ? ''
-                : ` · ${tokens(cost.input + cost.output)} tok (${tokens(cost.input)} in / ${tokens(cost.output)} out)`}
-            </Text>
-          </Box>
+    const callLines = (mine: Call[], shown: number) => {
+      const recent = mine.slice(-shown)
+      return (
+        <Box flexDirection="column">
           {mine.length > recent.length && (
             <Text dimColor>{'    '}… {mine.length - recent.length} earlier</Text>
           )}
@@ -409,14 +372,93 @@ export const register: Register = on => {
               </Text>
             </Box>
           ))}
+        </Box>
+      )
+    }
+    const setupText = (id: string) => {
+      const setup = configs.find(x => x.agentId === id)
+      return setup === undefined
+        ? ''
+        : ` · ${shortModel(setup.model)}${setup.effort === '' ? '' : ` · effort ${setup.effort}`}`
+    }
+    const costText = (id: string) => {
+      const cost = spent.find(x => x.agentId === id)
+      return cost === undefined
+        ? ''
+        : ` · ${tokens(cost.input + cost.output)} tok (${tokens(cost.input)} in / ${tokens(cost.output)} out)`
+    }
+
+    // Main agent: its own area at the top, with a tally of tools by name.
+    const mainCalls = log.filter(c => c.agentId === MAIN)
+    const tally = new Map<string, number>()
+    for (const c of mainCalls) tally.set(c.tool, (tally.get(c.tool) ?? 0) + 1)
+    const tallyText = [...tally.entries()]
+      .sort((x, y) => y[1] - x[1])
+      .map(([tool, n]) => `${tool}×${n}`)
+      .join('  ')
+    const failed = mainCalls.filter(c => c.status === 'error').length
+    const mainShown = Math.min(SHOWN_CALLS + 1, Math.max(2, Math.floor(room / 3)))
+    const mainUsed =
+      2 + Math.min(mainCalls.length, mainShown) + (mainCalls.length > mainShown ? 1 : 0)
+    const main = (
+      <Box flexDirection="column">
+        <Box>
+          <Text color="claude">▌ </Text>
+          <Text bold>Main agent</Text>
+          <Text dimColor wrap="truncate-end">
+            {setupText(MAIN)} · {mainCalls.length} tools
+            {failed > 0 ? ` (${failed} failed)` : ''}
+            {costText(MAIN)}
+          </Text>
+        </Box>
+        {tallyText !== '' && (
+          <Text dimColor wrap="truncate-end">{'    '}{tallyText}</Text>
+        )}
+        {callLines(mainCalls, mainShown)}
+      </Box>
+    )
+
+    const running = rows.filter(a => !FINISHED.includes(a.status)).length
+
+    // Subagents: newest first; each takes a header and its last few tool
+    // calls, until the pane is full.
+    const blocks = []
+    let used = mainUsed + 2
+    for (const a of [...rows].reverse()) {
+      const mine = log.filter(c => c.agentId === a.id)
+      const recent = mine.slice(-SHOWN_CALLS)
+      const need = 1 + recent.length + (mine.length > recent.length ? 1 : 0)
+      if (used + need > room && blocks.length > 0) break
+      used += need
+      const isOver = FINISHED.includes(a.status)
+      blocks.push(
+        <Box key={a.id} flexDirection="column">
+          <Box>
+            <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} </Text>
+            <Text bold dimColor={isOver} wrap="truncate-end">
+              {a.name !== '' ? a.name : a.type}
+              {a.label !== '' && a.label !== a.type ? ` (${a.label})` : ` (${a.type})`}
+            </Text>
+            <Text dimColor>
+              {' '}
+              {a.id.slice(0, 8)}
+              {setupText(a.id)} · {a.status} · {mine.length} tools
+              {costText(a.id)}
+            </Text>
+          </Box>
+          {callLines(mine, SHOWN_CALLS)}
         </Box>,
       )
     }
 
     return (
       <Box flexDirection="column">
+        {main}
+        <Text> </Text>
         <Text bold>
-          {rows.length} subagents · {running} active
+          {rows.length === 0
+            ? 'Subagents · none yet'
+            : `Subagents · ${rows.length} total · ${running} active`}
         </Text>
         {blocks}
       </Box>
