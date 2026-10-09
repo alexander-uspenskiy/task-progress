@@ -171,13 +171,15 @@ test('the pane lists a subagent with its tools, status and token usage', async (
     },
   } as never)
   expect(await pane.find({ type: 'Text', text: /Explore \(find hooks\)/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /abcdef12 · haiku-5-5 · effort high · running · 1 tools · 1\.5k tok/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /abcdef12 · running · haiku-5-5 · effort high/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /haiku-5-5 · effort high/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /TodoWrite/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /opus-5-5 · effort xhigh · 2 tools · 5\.7k tok \(5\.0k in \/ 700 out \/ 4\.0k cached\)/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /Bash×2/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /Session \(all agents\) · 6\.2k in · 1\.0k out · 4\.0k cached/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /This turn · 6\.2k in · 1\.0k out · 4\.0k cached/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /opus-5-5 · effort xhigh/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /1 tools · 1\.5k tok · 1\.2k in · 300 out · 0 cached/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /5\.7k tok · 5\.0k in · 700 out · 4\.0k cached/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /2 tools · Bash×2/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^\s*6\.2k in · 1\.0k out · 4\.0k cached$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^\s*6\.2k in · 1\.0k out · 4\.0k cached$/ })).toBeDefined()
   await pane.unmount()
 
   const band = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
@@ -232,7 +234,7 @@ test('a turn whose requests report no usage is still counted from its closing re
       view: {},
     },
   } as never)
-  expect(await pane.find({ type: 'Text', text: /Session \(all agents\) · 100 in · 200 out · 300 cached/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^\s*100 in · 200 out · 300 cached$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /counted: 0\/1 requests · 1 turns/ })).toBeDefined()
   await pane.unmount()
 })

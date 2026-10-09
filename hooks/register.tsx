@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRow, Call, Run, Seen, Setup, Tok, Todo, Totals, Usage } from '../types'
+import type { AgentRow, Call, Run, Seen, Setup, Tok, Todo, Usage } from '../types'
 
 type Turn = { tools: number; seconds: number }
 
@@ -17,12 +17,12 @@ const TASK_HINT =
 
 const todos = atom({ plugin: 'task-progress', key: 'todos' } as const, [])
 const calls = atom({ plugin: 'task-progress', key: 'calls' } as const, [])
-const usage = atom({ plugin: 'task-progress', key: 'usage' } as const, [])
+// Per agent, for the whole session; the session total is their sum. (The key
+// is versioned so figures kept by earlier builds are not carried over.)
+const usage = atom({ plugin: 'task-progress', key: 'usage2' } as const, [])
 const NONE: Tok = { input: 0, output: 0, cached: 0 }
-const totals = atom({ plugin: 'task-progress', key: 'totals' } as const, {
-  session: NONE,
-  run: NONE,
-})
+// Everything since the last prompt, all agents.
+const turn = atom({ plugin: 'task-progress', key: 'turn2' } as const, NONE)
 // What each turn's own requests have already added, so a turn's closing
 // report only adds what they missed.
 const seen = atom({ plugin: 'task-progress', key: 'seen' } as const, [])
@@ -78,7 +78,17 @@ const COLOR: Record<string, string> = {
 }
 const FINISHED = ['completed', 'failed', 'killed']
 
-const tokens = (n: number) => (n < 1000 ? String(n) : `${(n / 1000).toFixed(1)}k`)
+const tokens = (n: number) =>
+  n < 1000
+    ? String(n)
+    : n < 1_000_000
+      ? `${(n / 1000).toFixed(1)}k`
+      : `${(n / 1_000_000).toFixed(1)}M`
+const sumUsage = (list: Usage[]): Tok => ({
+  input: list.reduce((n, x) => n + x.input, 0),
+  output: list.reduce((n, x) => n + x.output, 0),
+  cached: list.reduce((n, x) => n + x.cached, 0),
+})
 const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
 
 // The most telling argument of a tool call, as one short string for the pane.
@@ -139,7 +149,7 @@ async function count($: EngineInterface, agentId: string, bump: Tok) {
     output: t.output + bump.output,
     cached: t.cached + bump.cached,
   })
-  await update($, totals, t => ({ session: add(t.session), run: add(t.run) }))
+  await update($, turn, add)
   await update($, usage, list => {
     const prev = list.find(x => x.agentId === agentId)
     const sum: Usage = { agentId, ...add(prev ?? { ...NONE }) }
@@ -184,7 +194,7 @@ export const register: Register = on => {
     const expectedSeconds = median(history.map(h => h.seconds), 60)
     await update($, todos, list => list.filter(t => t.status !== 'completed'))
     await update($, calls, list => list.filter(c => c.agentId !== MAIN))
-    await update($, totals, t => ({ ...t, run: NONE }))
+    await update($, turn, () => NONE)
     await update($, run, () => ({
       startedAt,
       now: startedAt,
@@ -389,8 +399,9 @@ export const register: Register = on => {
       if (i < SEGMENTS - 1) bar.push(<Text key={`g${i}`}>{' '}</Text>)
     }
     const percent = `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
-    const spent = await read($, totals)
-    const hasTokens = spent.session.input + spent.session.output + spent.session.cached > 0
+    const thisTurn = await read($, turn)
+    const session = sumUsage(await read($, usage))
+    const hasTokens = session.input + session.output + session.cached > 0
 
     return (
       <Box flexDirection="column">
@@ -410,7 +421,7 @@ export const register: Register = on => {
       </Box>
       {hasTokens && (
         <Text color={PALETTE.muted} wrap="truncate-end">
-          turn {tokText(spent.run)} · session {tokText(spent.session)}
+          turn {tokText(thisTurn)} · session {tokText(session)}
         </Text>
       )}
       </Box>
@@ -423,11 +434,23 @@ export const register: Register = on => {
     const log = await read($, calls)
     const spent = await read($, usage)
     const configs = await read($, setups)
-    const spentAll = await read($, totals)
+    const thisTurn = await read($, turn)
     const dg = await read($, diag)
-    const room = Math.max(6, (e.viewport?.rows ?? 24) - 4)
+    const session = sumUsage(spent)
+    const room = Math.max(8, (e.viewport?.rows ?? 24) - 4)
     const SHOWN_CALLS = 4
 
+    // Every line is one Text that truncates at the pane's edge, and a label
+    // that must stay whole sits in a Box that does not shrink, so a narrow
+    // pane cuts the detail and never wraps a name onto two lines.
+    const line = (key: string, label: string, detail: string, color?: string) => (
+      <Box key={key}>
+        <Box flexShrink={0}>
+          <Text bold color={color}>{label}</Text>
+        </Box>
+        <Text dimColor wrap="truncate-end">{detail}</Text>
+      </Box>
+    )
     const callLines = (mine: Call[], shown: number) => {
       const recent = mine.slice(-shown)
       return (
@@ -437,11 +460,12 @@ export const register: Register = on => {
           )}
           {recent.map(c => (
             <Box key={c.id}>
-              <Text color={c.status === 'error' ? 'error' : c.status === 'done' ? 'success' : 'claude'}>
-                {'    '}
-                {c.status === 'error' ? '✗' : c.status === 'done' ? '✓' : '◐'}{' '}
-              </Text>
-              <Text>{c.tool}</Text>
+              <Box flexShrink={0}>
+                <Text color={c.status === 'error' ? 'error' : c.status === 'done' ? 'success' : 'claude'}>
+                  {'    '}
+                  {c.status === 'error' ? '✗' : c.status === 'done' ? '✓' : '◐'} {c.tool}
+                </Text>
+              </Box>
               <Text dimColor wrap="truncate-end">
                 {c.hint === '' ? '' : ` ${c.hint}`} ·{' '}
                 {c.status === 'running' ? 'running' : seconds(c.ms)}
@@ -453,75 +477,73 @@ export const register: Register = on => {
     }
     const setupText = (id: string) => {
       const setup = configs.find(x => x.agentId === id)
-      return setup === undefined
-        ? ''
-        : ` · ${shortModel(setup.model)}${setup.effort === '' ? '' : ` · effort ${setup.effort}`}`
+      if (setup === undefined) return ''
+      return `${shortModel(setup.model)}${setup.effort === '' ? '' : ` · effort ${setup.effort}`}`
     }
     const costText = (id: string) => {
       const cost = spent.find(x => x.agentId === id)
       return cost === undefined
-        ? ''
-        : ` · ${tokens(cost.input + cost.output)} tok (${tokens(cost.input)} in / ${tokens(cost.output)} out${cost.cached > 0 ? ` / ${tokens(cost.cached)} cached` : ''})`
+        ? 'no tokens yet'
+        : `${tokens(cost.input + cost.output)} tok · ${tokText(cost)}`
     }
 
-    // Main agent: its own area at the top, with a tally of tools by name.
+    // Main agent: a card of its own at the top.
     const mainCalls = log.filter(c => c.agentId === MAIN)
     const tally = new Map<string, number>()
     for (const c of mainCalls) tally.set(c.tool, (tally.get(c.tool) ?? 0) + 1)
     const tallyText = [...tally.entries()]
       .sort((x, y) => y[1] - x[1])
       .map(([tool, n]) => `${tool}×${n}`)
-      .join('  ')
+      .join(' ')
     const failed = mainCalls.filter(c => c.status === 'error').length
     const mainShown = Math.min(SHOWN_CALLS + 1, Math.max(2, Math.floor(room / 3)))
     const mainUsed =
-      2 + Math.min(mainCalls.length, mainShown) + (mainCalls.length > mainShown ? 1 : 0)
+      4 + Math.min(mainCalls.length, mainShown) + (mainCalls.length > mainShown ? 1 : 0)
     const main = (
       <Box flexDirection="column">
-        <Box>
-          <Text color="claude">▌ </Text>
-          <Text bold>Main agent</Text>
-          <Text dimColor wrap="truncate-end">
-            {setupText(MAIN)} · {mainCalls.length} tools
-            {failed > 0 ? ` (${failed} failed)` : ''}
-            {costText(MAIN)}
-          </Text>
-        </Box>
-        {tallyText !== '' && (
-          <Text dimColor wrap="truncate-end">{'    '}{tallyText}</Text>
-        )}
+        {line('main', '▌ Main agent', setupText(MAIN) === '' ? '' : `  ${setupText(MAIN)}`, 'claude')}
+        <Text dimColor wrap="truncate-end">{'    '}{costText(MAIN)}</Text>
+        <Text dimColor wrap="truncate-end">
+          {'    '}
+          {mainCalls.length} tools{failed > 0 ? ` (${failed} failed)` : ''}
+          {tallyText === '' ? '' : ` · ${tallyText}`}
+        </Text>
         {callLines(mainCalls, mainShown)}
       </Box>
     )
 
     const running = rows.filter(a => !FINISHED.includes(a.status)).length
 
-    // Subagents: newest first; each takes a header and its last few tool
-    // calls, until the pane is full.
+    // Subagents: newest first; each takes a card of a few lines, until the
+    // pane is full.
     const blocks = []
-    let used = mainUsed + 2
+    let used = mainUsed + 5
     for (const a of [...rows].reverse()) {
       const mine = log.filter(c => c.agentId === a.id)
       const recent = mine.slice(-SHOWN_CALLS)
-      const need = 1 + recent.length + (mine.length > recent.length ? 1 : 0)
+      const need = 3 + recent.length + (mine.length > recent.length ? 1 : 0)
       if (used + need > room && blocks.length > 0) break
       used += need
       const isOver = FINISHED.includes(a.status)
+      const name = a.name !== '' ? a.name : a.type
+      const what = a.label !== '' && a.label !== a.type ? ` (${a.label})` : ''
       blocks.push(
         <Box key={a.id} flexDirection="column">
           <Box>
-            <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} </Text>
-            <Text bold dimColor={isOver} wrap="truncate-end">
-              {a.name !== '' ? a.name : a.type}
-              {a.label !== '' && a.label !== a.type ? ` (${a.label})` : ` (${a.type})`}
-            </Text>
-            <Text dimColor>
-              {' '}
-              {a.id.slice(0, 8)}
-              {setupText(a.id)} · {a.status} · {mine.length} tools
-              {costText(a.id)}
-            </Text>
+            <Box flexShrink={0}>
+              <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} </Text>
+            </Box>
+            <Text bold dimColor={isOver} wrap="truncate-end">{name}{what}</Text>
           </Box>
+          <Text dimColor wrap="truncate-end">
+            {'    '}
+            {a.id.slice(0, 8)} · {a.status}
+            {setupText(a.id) === '' ? '' : ` · ${setupText(a.id)}`}
+          </Text>
+          <Text dimColor wrap="truncate-end">
+            {'    '}
+            {mine.length} tools · {costText(a.id)}
+          </Text>
           {callLines(mine, SHOWN_CALLS)}
         </Box>,
       )
@@ -529,12 +551,11 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Text dimColor wrap="truncate-end">
-          Session (all agents) · {tokText(spentAll.session)}
-        </Text>
-        <Text dimColor wrap="truncate-end">
-          This turn · {tokText(spentAll.run)}
-        </Text>
+        <Text bold>Tokens</Text>
+        <Text dimColor wrap="truncate-end">{'  '}session (all agents)</Text>
+        <Text wrap="truncate-end">{'    '}{tokText(session)}</Text>
+        <Text dimColor wrap="truncate-end">{'  '}this turn</Text>
+        <Text wrap="truncate-end">{'    '}{tokText(thisTurn)}</Text>
         <Text> </Text>
         {main}
         <Text> </Text>
