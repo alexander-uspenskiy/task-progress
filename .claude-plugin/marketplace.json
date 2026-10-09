@@ -1,0 +1,13 @@
+{
+  "name": "task-progress",
+  "owner": {
+    "name": "Alexander Uspensky"
+  },
+  "plugins": [
+    {
+      "name": "task-progress",
+      "source": "./"
+    }
+  ],
+  "description": "Claude Code mods by Alexander Uspensky"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "task-progress",
+  "version": "0.1.0",
+  "description": "Progress bar above the prompt while a task runs, plus a pane listing subagents with their statuses.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Alexander Uspensky"
+  }
+}
