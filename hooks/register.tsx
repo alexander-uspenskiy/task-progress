@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRow, Call, Run, Todo, Usage } from '../types'
+import type { AgentRow, Call, Run, Setup, Todo, Usage } from '../types'
 
 type Turn = { tools: number; seconds: number }
 
@@ -17,6 +17,7 @@ const TASK_HINT =
 const todos = atom({ plugin: 'task-progress', key: 'todos' } as const, [])
 const calls = atom({ plugin: 'task-progress', key: 'calls' } as const, [])
 const usage = atom({ plugin: 'task-progress', key: 'usage' } as const, [])
+const setups = atom({ plugin: 'task-progress', key: 'setups' } as const, [])
 const agents = atom({ plugin: 'task-progress', key: 'agents' } as const, [])
 const run = atom({ plugin: 'task-progress', key: 'run' } as const, {
   startedAt: 0,
@@ -77,6 +78,9 @@ const hintOf = (input: object) => {
   }
   return ''
 }
+
+// claude-haiku-5-5-20260101 -> haiku-5-5
+const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
 
 const clock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -191,6 +195,28 @@ export const register: Register = on => {
     }
     return ran
   }).catch(($, e, next) => next(e))
+
+  // Each model request of a subagent says which model and effort it runs on.
+  // turn.step streams, so the hook is a generator that forwards the stream.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined) {
+      try {
+        const agentId = e.agentId
+        const effort = e.effort === undefined ? '' : String(e.effort)
+        const known = await read($, setups)
+        const now = known.find(x => x.agentId === agentId)
+        if (now === undefined || now.model !== e.model || now.effort !== effort) {
+          await update($, setups, list => [
+            ...list.filter(x => x.agentId !== agentId),
+            { agentId, model: e.model, effort },
+          ])
+        }
+      } catch {
+        // a failed note must not fail the model request
+      }
+    }
+    return yield* next(e)
+  })
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
     await update($, todos, () =>
@@ -325,6 +351,7 @@ export const register: Register = on => {
     const rows = await read($, agents)
     const log = await read($, calls)
     const spent = await read($, usage)
+    const configs = await read($, setups)
     const room = Math.max(4, (e.viewport?.rows ?? 24) - 4)
 
     if (rows.length === 0) {
@@ -345,6 +372,7 @@ export const register: Register = on => {
       if (used + need > room && blocks.length > 0) break
       used += need
       const cost = spent.find(x => x.agentId === a.id)
+      const setup = configs.find(x => x.agentId === a.id)
       const isOver = FINISHED.includes(a.status)
       blocks.push(
         <Box key={a.id} flexDirection="column">
@@ -356,7 +384,10 @@ export const register: Register = on => {
             </Text>
             <Text dimColor>
               {' '}
-              {a.id.slice(0, 8)} · {a.status} · {mine.length} tools
+              {a.id.slice(0, 8)}
+              {setup === undefined ? '' : ` · ${shortModel(setup.model)}`}
+              {setup === undefined || setup.effort === '' ? '' : ` · effort ${setup.effort}`} ·{' '}
+              {a.status} · {mine.length} tools
               {cost === undefined
                 ? ''
                 : ` · ${tokens(cost.input + cost.output)} tok (${tokens(cost.input)} in / ${tokens(cost.output)} out)`}

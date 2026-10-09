@@ -93,6 +93,9 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('tool.call', () => ({ result: { text: 'ok' } }) as never)
   on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+  on('turn.step', async function* () {
+    return { turnId: 'x', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
+  })
   on('agent.list', () =>
     ({
       value: [{ id: 'abcdef123456', description: 'find hooks', type: 'Explore', status: 'running' }],
@@ -100,6 +103,16 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   )
 
   await $.prompt.submit({ text: 'go' } as never)
+  for await (const _chunk of $.turn.step({
+    turnId: 'x',
+    index: 0,
+    model: 'claude-haiku-5-5-20260101',
+    effort: 'high',
+    messageCount: 1,
+    agentId: 'abcdef123456',
+  } as never)) {
+    // drain the stream: the hook runs as the stream is read
+  }
   await $.tool.call({
     tool: 'Grep',
     pattern: 'TodoWrite',
@@ -132,7 +145,8 @@ test('the pane lists a subagent with its tools, status and token usage', async (
     },
   } as never)
   expect(await pane.find({ type: 'Text', text: /Explore \(find hooks\)/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /abcdef12 · running · 1 tools · 1\.5k tok/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /abcdef12 · haiku-5-5 · effort high · running · 1 tools · 1\.5k tok/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /haiku-5-5 · effort high/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /TodoWrite/ })).toBeDefined()
   await pane.unmount()
 })
