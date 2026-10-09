@@ -21,3 +21,12 @@ Without installing: `claude --plugin-dir /path/to/task-progress`.
 claude plugin validate .
 claude plugin test .
 ```
+
+## Check the token figures
+
+`scripts/check-usage.py` sums the usage the API reported in the session transcript, one row per prompt, so it can be compared with the bar's `turn ... in · ... out · ... cached` line:
+
+```
+python3 scripts/check-usage.py                # newest session of the current project
+python3 scripts/check-usage.py --subagents    # also add subagent transcripts
+```
