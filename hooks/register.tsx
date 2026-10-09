@@ -195,14 +195,14 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'task-agents',
-      description: 'Open the subagents pane (status of every subagent)',
+      description: 'Open the agents pane (status of every agent)',
     })
     return next(e)
   })
 
   on('command.run', { command: 'task-agents' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'Subagents' })
-    return { text: 'Subagents pane opened.' }
+    await $.ui.open({ id: PANE, title: 'Agents' })
+    return { text: 'Agents pane opened.' }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -221,7 +221,7 @@ export const register: Register = on => {
       expectedTools: Math.max(3, expectedTools),
       expectedSeconds: Math.max(15, expectedSeconds),
     }))
-    void $.ui.open({ id: PANE, title: 'Subagents' })
+    void $.ui.open({ id: PANE, title: 'Agents' })
     tick?.cancel()
     tick = $.clock.every(TICK_MS, () => void refresh($))
 
@@ -582,8 +582,8 @@ export const register: Register = on => {
         <Text> </Text>
         <Text bold>
           {rows.length === 0
-            ? 'Subagents · none yet'
-            : `Subagents · ${rows.length} total · ${running} active`}
+            ? 'Agents · none yet'
+            : `Agents · ${rows.length} total · ${running} active`}
         </Text>
         {blocks}
         <Text> </Text>

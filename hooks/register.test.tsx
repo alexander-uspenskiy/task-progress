@@ -162,7 +162,7 @@ test('the pane lists a subagent with its tools, status and token usage', async (
     component: 'Pane',
     requestId: 'task-agents',
     props: {
-      title: 'Subagents',
+      title: 'Agents',
       isFocused: false,
       bodyColumns: 80,
       placement: 'dock',
@@ -226,7 +226,7 @@ test('a turn whose requests report no usage is still counted from its closing re
     component: 'Pane',
     requestId: 'task-agents',
     props: {
-      title: 'Subagents',
+      title: 'Agents',
       isFocused: false,
       bodyColumns: 80,
       placement: 'dock',
