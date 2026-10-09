@@ -175,20 +175,20 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   expect(await pane.find({ type: 'Text', text: /haiku-5-5 · effort high/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /TodoWrite/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /opus-5-5 · effort xhigh/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /1 tools · 1\.5k tok · 1\.2k in · 300 out · 0 cached/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /5\.7k tok · 5\.0k in · 700 out · 4\.0k cached/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /1 tools · 1\.5k tok · 1\.2k in · 300 out$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /9\.7k tok · 9\.0k in \(4\.0k cached\) · 700 out/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /2 tools · Bash×2/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /^\s*6\.2k in · 1\.0k out · 4\.0k cached$/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /^\s*6\.2k in · 1\.0k out · 4\.0k cached$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^\s*10\.2k in \(4\.0k cached\) · 1\.0k out$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^\s*10\.2k in \(4\.0k cached\) · 1\.0k out$/ })).toBeDefined()
   await pane.unmount()
 
   const band = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
-  expect(await band.find({ type: 'Text', text: /turn 6\.2k in · 1\.0k out · 4\.0k cached · session 6\.2k in/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /turn 10\.2k in \(4\.0k cached\) · 1\.0k out · session 10\.2k in \(4\.0k cached\)/ })).toBeDefined()
   await band.unmount()
 
   await $.prompt.submit({ text: 'next' } as never)
   const fresh = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
-  expect(await fresh.find({ type: 'Text', text: /turn 0 in · 0 out · 0 cached · session 6\.2k in/ })).toBeDefined()
+  expect(await fresh.find({ type: 'Text', text: /turn 0 in · 0 out · session 10\.2k in \(4\.0k cached\)/ })).toBeDefined()
   await fresh.unmount()
 })
 
@@ -217,7 +217,7 @@ test('a turn whose requests report no usage is still counted from its closing re
     isAborted: false,
     turnId: 'z',
     reason: 'answer',
-    usage: { model: 'm', input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 300, cache_creation_input_tokens: 0 },
+    usage: { model: 'm', input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 300, cache_creation_input_tokens: 50 },
   } as never)
 
   const pane = await $.ui.mount({
@@ -234,7 +234,7 @@ test('a turn whose requests report no usage is still counted from its closing re
       view: {},
     },
   } as never)
-  expect(await pane.find({ type: 'Text', text: /^\s*100 in · 200 out · 300 cached$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^\s*450 in \(300 cached\) · 200 out$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /counted: 0\/1 requests · 1 turns/ })).toBeDefined()
   await pane.unmount()
 })

@@ -24,7 +24,7 @@ claude plugin test .
 
 ## Check the token figures
 
-`scripts/check-usage.py` sums the usage the API reported in the session transcript, one row per prompt, so it can be compared with the bar's `turn ... in · ... out · ... cached` line:
+`scripts/check-usage.py` sums the usage the API reported in the session transcript, one row per prompt, so it can be compared with the bar's `turn 299.7k in (299.6k cached) · 1.1k out` line. `in` is the full input: the API's own `input_tokens` is only the fresh part, which for a long conversation is a handful of tokens because the rest is read from the cache.
 
 ```
 python3 scripts/check-usage.py                # newest session of the current project

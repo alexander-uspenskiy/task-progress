@@ -9,9 +9,10 @@ a row with the bar's `turn ... in · ... out · ... cached` line.
   python3 scripts/check-usage.py <session-id>    # a given session
   python3 scripts/check-usage.py --subagents     # also add subagent transcripts
 
-Notes: `in` is uncached input only, `cached` is cache reads, and cache writes
-are listed separately because the bar does not show them. A message is counted
-once even when the transcript splits it over several lines.
+Notes: the API's own `input_tokens` is only the fresh part of the input (a long
+conversation reads "2"), so `in` here, like the bar, is the full input: fresh +
+cache reads + cache writes, with `cached` the cache-read part of it. A message
+is counted once even when the transcript splits it over several lines.
 """
 import glob, json, os, sys
 
@@ -85,15 +86,17 @@ def main():
                         sub["in"] += u.get("input_tokens", 0); sub["out"] += u.get("output_tokens", 0)
                         sub["cr"] += u.get("cache_read_input_tokens", 0); sub["cw"] += u.get("cache_creation_input_tokens", 0)
 
-    print(f"{'time':8} {'req':>3}  {'in':>6} {'out':>7} {'cached':>8} {'(cache write)':>13}  prompt")
+    print(f"{'time':8} {'req':>3}  {'in':>7} {'(cached)':>9} {'out':>7}  {'(fresh)':>8}  prompt")
     tot = {"in": 0, "out": 0, "cr": 0, "cw": 0}
     for t in turns:
-        print(f"{t['t']:8} {t['req']:>3}  {k(t['in']):>6} {k(t['out']):>7} {k(t['cr']):>8} {k(t['cw']):>13}  {t['p']}")
+        full = t["in"] + t["cr"] + t["cw"]
+        print(f"{t['t']:8} {t['req']:>3}  {k(full):>7} {k(t['cr']):>9} {k(t['out']):>7}  {k(t['in']):>8}  {t['p']}")
         for key in tot:
             tot[key] += t[key]
     for key in tot:
         tot[key] += sub[key]
     label = "session total (main + subagents)" if with_sub else "session total (main agent only)"
-    print(f"\n{label}: {k(tot['in'])} in · {k(tot['out'])} out · {k(tot['cr'])} cached  (cache writes {k(tot['cw'])})")
+    full = tot["in"] + tot["cr"] + tot["cw"]
+    print(f"\n{label}: {k(full)} in ({k(tot['cr'])} cached) · {k(tot['out'])} out")
 
 main()

@@ -16,7 +16,9 @@ export type Call = {
   ms: number
 }
 export type Setup = { agentId: string; model: string; effort: string }
-export type Tok = { input: number; output: number; cached: number }
+// input: tokens the API read as fresh input; cached: cache reads; written: cache writes.
+// The full input of a request is input + cached + written.
+export type Tok = { input: number; output: number; cached: number; written: number }
 export type Seen = { turnId: string } & Tok
 export type Diag = { steps: number; withUsage: number; completes: number; error: string }
 export type Usage = { agentId: string; input: number; output: number; cached: number }
@@ -36,10 +38,10 @@ declare module 'claude-code' {
       agents: AgentRow[]
       run: Run
       calls: Call[]
-      usage2: Usage[]
+      usage3: Usage[]
       setups: Setup[]
-      turn2: Tok
-      seen: Seen[]
+      turn3: Tok
+      seen2: Seen[]
       diag: Diag
     }
   }

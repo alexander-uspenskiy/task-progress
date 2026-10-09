@@ -19,13 +19,13 @@ const todos = atom({ plugin: 'task-progress', key: 'todos' } as const, [])
 const calls = atom({ plugin: 'task-progress', key: 'calls' } as const, [])
 // Per agent, for the whole session; the session total is their sum. (The key
 // is versioned so figures kept by earlier builds are not carried over.)
-const usage = atom({ plugin: 'task-progress', key: 'usage2' } as const, [])
-const NONE: Tok = { input: 0, output: 0, cached: 0 }
+const usage = atom({ plugin: 'task-progress', key: 'usage3' } as const, [])
+const NONE: Tok = { input: 0, output: 0, cached: 0, written: 0 }
 // Everything since the last prompt, all agents.
-const turn = atom({ plugin: 'task-progress', key: 'turn2' } as const, NONE)
+const turn = atom({ plugin: 'task-progress', key: 'turn3' } as const, NONE)
 // What each turn's own requests have already added, so a turn's closing
 // report only adds what they missed.
-const seen = atom({ plugin: 'task-progress', key: 'seen' } as const, [])
+const seen = atom({ plugin: 'task-progress', key: 'seen2' } as const, [])
 const diag = atom({ plugin: 'task-progress', key: 'diag' } as const, {
   steps: 0,
   withUsage: 0,
@@ -88,6 +88,7 @@ const sumUsage = (list: Usage[]): Tok => ({
   input: list.reduce((n, x) => n + x.input, 0),
   output: list.reduce((n, x) => n + x.output, 0),
   cached: list.reduce((n, x) => n + x.cached, 0),
+  written: list.reduce((n, x) => n + x.written, 0),
 })
 const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
 
@@ -104,9 +105,13 @@ const hintOf = (input: object) => {
   return ''
 }
 
-// 12.1k in · 3.4k out · 32.7k cached
+// The API's `input_tokens` is only the fresh part: the prompt's cached prefix
+// is counted apart, so a 300k-token conversation reads "2 in". Show the whole
+// input, and how much of it came from the cache.
+//   299.7k in (299.6k cached) · 1.1k out
+const fullInput = (t: Tok) => t.input + t.cached + t.written
 const tokText = (t: Tok) =>
-  `${tokens(t.input)} in · ${tokens(t.output)} out · ${tokens(t.cached)} cached`
+  `${tokens(fullInput(t))} in${t.cached > 0 ? ` (${tokens(t.cached)} cached)` : ''} · ${tokens(t.output)} out`
 
 // claude-haiku-5-5-20260101 -> haiku-5-5
 const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
@@ -143,11 +148,24 @@ const measure = (list: Todo[], rows: AgentRow[]) => {
   return { done, total: rows.length, label: rows.length > 0 ? 'subagents' : '' }
 }
 
+const bumpOf = (u: {
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+}): Tok => ({
+  input: u.input_tokens,
+  output: u.output_tokens,
+  cached: u.cache_read_input_tokens,
+  written: u.cache_creation_input_tokens,
+})
+
 async function count($: EngineInterface, agentId: string, bump: Tok) {
   const add = (t: Tok): Tok => ({
     input: t.input + bump.input,
     output: t.output + bump.output,
     cached: t.cached + bump.cached,
+    written: t.written + bump.written,
   })
   await update($, turn, add)
   await update($, usage, list => {
@@ -266,7 +284,7 @@ export const register: Register = on => {
       if (u !== null && u !== undefined) {
         const agentId = e.agentId ?? MAIN
         const turnId = e.turnId
-        const bump = { input: u.input_tokens, output: u.output_tokens, cached: u.cache_read_input_tokens }
+        const bump = bumpOf(u)
         await update($, seen, list => {
           const prev = list.find(x => x.turnId === turnId)
           const sum: Seen = {
@@ -274,6 +292,7 @@ export const register: Register = on => {
             input: (prev?.input ?? 0) + bump.input,
             output: (prev?.output ?? 0) + bump.output,
             cached: (prev?.cached ?? 0) + bump.cached,
+            written: (prev?.written ?? 0) + bump.written,
           }
           return [...list.filter(x => x.turnId !== turnId), sum].slice(-50)
         })
@@ -332,12 +351,14 @@ export const register: Register = on => {
       const u = e.usage
       if (u !== undefined) {
         const had = (await read($, seen)).find(x => x.turnId === e.turnId)
-        const missing = {
-          input: Math.max(0, u.input_tokens - (had?.input ?? 0)),
-          output: Math.max(0, u.output_tokens - (had?.output ?? 0)),
-          cached: Math.max(0, u.cache_read_input_tokens - (had?.cached ?? 0)),
+        const full = bumpOf(u)
+        const missing: Tok = {
+          input: Math.max(0, full.input - (had?.input ?? 0)),
+          output: Math.max(0, full.output - (had?.output ?? 0)),
+          cached: Math.max(0, full.cached - (had?.cached ?? 0)),
+          written: Math.max(0, full.written - (had?.written ?? 0)),
         }
-        if (missing.input + missing.output + missing.cached > 0) {
+        if (missing.input + missing.output + missing.cached + missing.written > 0) {
           await count($, e.agentId ?? MAIN, missing)
         }
         await update($, seen, list => list.filter(x => x.turnId !== e.turnId))
@@ -401,7 +422,7 @@ export const register: Register = on => {
     const percent = `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
     const thisTurn = await read($, turn)
     const session = sumUsage(await read($, usage))
-    const hasTokens = session.input + session.output + session.cached > 0
+    const hasTokens = fullInput(session) + session.output > 0
 
     return (
       <Box flexDirection="column">
@@ -484,7 +505,7 @@ export const register: Register = on => {
       const cost = spent.find(x => x.agentId === id)
       return cost === undefined
         ? 'no tokens yet'
-        : `${tokens(cost.input + cost.output)} tok · ${tokText(cost)}`
+        : `${tokens(fullInput(cost) + cost.output)} tok · ${tokText(cost)}`
     }
 
     // Main agent: a card of its own at the top.
