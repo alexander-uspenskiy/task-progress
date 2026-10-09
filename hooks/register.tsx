@@ -4,8 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { AgentRow, Run, Todo } from '../types'
 
 const PANE = 'task-agents'
-const BAR_WIDTH = 24
-const SWEEP = 6
+const SEGMENTS = 20
+const TICK_MS = 400
 const TASK_HINT =
   'The user has a progress bar above the prompt that follows your task list. ' +
   'For work with three or more steps, create the steps first with TaskCreate ' +
@@ -43,6 +43,7 @@ const ICON: Record<string, string> = {
 const PALETTE = {
   fill: 'claude',
   track: 'subtle',
+  trail: 'promptBorder',
   text: 'text',
   muted: 'inactive',
   done: 'success',
@@ -107,7 +108,7 @@ export const register: Register = on => {
     await update($, run, () => ({ startedAt, now: startedAt, isActive: true, tools: 0 }))
     void $.ui.open({ id: PANE, title: 'Subagents' })
     tick?.cancel()
-    tick = $.clock.every(1000, () => void refresh($))
+    tick = $.clock.every(TICK_MS, () => void refresh($))
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -195,37 +196,45 @@ export const register: Register = on => {
 
     const { Box, Text } = $.ui.resolve(e)
     const ratio = total === 0 ? 0 : done / total
-    const filled = Math.round(ratio * BAR_WIDTH)
     const elapsed = clock(r.now - r.startedAt)
-
     const isDone = total > 0 && done === total
     const fill = isDone ? PALETTE.done : PALETTE.fill
-    // Cells, not glyphs: a background-coloured space is the same solid bar in
-    // every font, where a line-drawing character turns into a hairline.
-    const cells = (n: number, color: string) =>
-      n > 0 ? <Text backgroundColor={color}>{' '.repeat(n)}</Text> : null
-    // No task list yet: a block sweeps along the track instead of a false 0%.
-    const lead = Math.floor((r.now - r.startedAt) / 1000) % (BAR_WIDTH - SWEEP + 1)
+    const beat = Math.floor(r.now / TICK_MS)
+
+    // Segmented cells. A background-coloured space is the same solid block in
+    // every font, so the bar never depends on a glyph the font may not draw.
+    // Task list: filled segments, and the next one pulses as the work front.
+    // No list yet: a scanner bounces back and forth, leaving a faint trail.
+    const lit = Math.floor(ratio * SEGMENTS)
+    const period = 2 * (SEGMENTS - 1)
+    const at = beat % period
+    const head = at < SEGMENTS ? at : period - at
+    const colorOf = (i: number) => {
+      if (total === 0) {
+        const away = Math.abs(i - head)
+        return away === 0 ? fill : away === 1 ? PALETTE.trail : PALETTE.track
+      }
+      if (i < lit) return fill
+      return i === lit && r.isActive && !isDone && beat % 2 === 0
+        ? fill
+        : PALETTE.track
+    }
+
+    const bar = []
+    for (let i = 0; i < SEGMENTS; i++) {
+      bar.push(<Text key={`s${i}`} backgroundColor={colorOf(i)}>{' '}</Text>)
+      if (i < SEGMENTS - 1) bar.push(<Text key={`g${i}`}>{' '}</Text>)
+    }
+    const percent = total === 0 ? '--%' : `${Math.round(ratio * 100)}%`
 
     return (
       <Box>
-        {total === 0 ? (
-          <Box>
-            {cells(lead, PALETTE.track)}
-            {cells(SWEEP, fill)}
-            {cells(BAR_WIDTH - SWEEP - lead, PALETTE.track)}
-          </Box>
-        ) : (
-          <Box>
-            {cells(filled, fill)}
-            {cells(BAR_WIDTH - filled, PALETTE.track)}
-          </Box>
-        )}
+        {bar}
         <Text bold color={fill}>
           {' '}
-          {total === 0 ? 'working' : `${Math.round(ratio * 100)}%`}
+          {percent.padStart(4)}
         </Text>
-        <Text color={PALETTE.text}>{total === 0 ? '' : ` ${done}/${total}`}</Text>
+        <Text color={PALETTE.text}>{total === 0 ? '' : `  ${done}/${total}`}</Text>
         <Text color={PALETTE.muted} wrap="truncate-end">
           {' '}
           · {elapsed}

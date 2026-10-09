@@ -40,7 +40,7 @@ test('band is hidden until a task starts, then follows TaskCreate/TaskUpdate', a
     await $.prompt.submit({ text: 'do the thing' } as never)
     if (surface === 'terminal') {
       const waiting = await $.ui.mount({ plugin: 'task-progress', surface, ...BAND } as never)
-      expect(await waiting.find({ type: 'Text', text: /working/ })).toBeDefined()
+      expect(await waiting.find({ type: 'Text', text: /--%/ })).toBeDefined()
       expect(await waiting.find({ type: 'Text', text: /0%/ })).toBeUndefined()
       await waiting.unmount()
     }
