@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRow, Call, Run, Setup, Todo, Usage } from '../types'
+import type { AgentRow, Call, Run, Setup, Tok, Todo, Totals, Usage } from '../types'
 
 type Turn = { tools: number; seconds: number }
 
@@ -18,6 +18,11 @@ const TASK_HINT =
 const todos = atom({ plugin: 'task-progress', key: 'todos' } as const, [])
 const calls = atom({ plugin: 'task-progress', key: 'calls' } as const, [])
 const usage = atom({ plugin: 'task-progress', key: 'usage' } as const, [])
+const NONE: Tok = { input: 0, output: 0, cached: 0 }
+const totals = atom({ plugin: 'task-progress', key: 'totals' } as const, {
+  session: NONE,
+  run: NONE,
+})
 const setups = atom({ plugin: 'task-progress', key: 'setups' } as const, [])
 const agents = atom({ plugin: 'task-progress', key: 'agents' } as const, [])
 const run = atom({ plugin: 'task-progress', key: 'run' } as const, {
@@ -79,6 +84,10 @@ const hintOf = (input: object) => {
   }
   return ''
 }
+
+// 12.1k in · 3.4k out · 32.7k cached
+const tokText = (t: Tok) =>
+  `${tokens(t.input)} in · ${tokens(t.output)} out · ${tokens(t.cached)} cached`
 
 // claude-haiku-5-5-20260101 -> haiku-5-5
 const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
@@ -152,6 +161,7 @@ export const register: Register = on => {
     const expectedSeconds = median(history.map(h => h.seconds), 60)
     await update($, todos, list => list.filter(t => t.status !== 'completed'))
     await update($, calls, list => list.filter(c => c.agentId !== MAIN))
+    await update($, totals, t => ({ ...t, run: NONE }))
     await update($, run, () => ({
       startedAt,
       now: startedAt,
@@ -212,7 +222,27 @@ export const register: Register = on => {
     } catch {
       // a failed note must not fail the model request
     }
-    return yield* next(e)
+    const response = yield* next(e)
+    try {
+      const u = response.usage
+      if (u !== null && u !== undefined) {
+        const agentId = e.agentId ?? MAIN
+        const add = (t: Tok): Tok => ({
+          input: t.input + u.input_tokens,
+          output: t.output + u.output_tokens,
+          cached: t.cached + u.cache_read_input_tokens,
+        })
+        await update($, totals, t => ({ session: add(t.session), run: add(t.run) }))
+        await update($, usage, list => {
+          const prev = list.find(x => x.agentId === agentId)
+          const sum: Usage = { agentId, ...add(prev ?? { ...NONE }) }
+          return [...list.filter(x => x.agentId !== agentId), sum]
+        })
+      }
+    } catch {
+      // a failed count must not fail the model request
+    }
+    return response
   })
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
@@ -256,22 +286,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
-    // Every turn ends here, a subagent's too: keep what it cost. Only the main
-    // loop's end ends the run.
-    if (e.usage !== undefined) {
-      const agentId = e.agentId ?? MAIN
-      const u = e.usage
-      await update($, usage, list => {
-        const prev = list.find(x => x.agentId === agentId)
-        const total: Usage = {
-          agentId,
-          input: (prev?.input ?? 0) + u.input_tokens,
-          output: (prev?.output ?? 0) + u.output_tokens,
-          cached: (prev?.cached ?? 0) + u.cache_read_input_tokens,
-        }
-        return [...list.filter(x => x.agentId !== agentId), total]
-      })
-    }
+    // Only the main loop's end ends the run; a subagent's turn also ends here.
     if (e.agentId === undefined) {
       tick?.cancel()
       tick = undefined
@@ -324,8 +339,11 @@ export const register: Register = on => {
       if (i < SEGMENTS - 1) bar.push(<Text key={`g${i}`}>{' '}</Text>)
     }
     const percent = `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
+    const spent = await read($, totals)
+    const hasTokens = spent.session.input + spent.session.output + spent.session.cached > 0
 
     return (
+      <Box flexDirection="column">
       <Box>
         {bar}
         <Text bold color={fill}>
@@ -340,6 +358,12 @@ export const register: Register = on => {
           {label === '' ? '' : ` · ${label}`}
         </Text>
       </Box>
+      {hasTokens && (
+        <Text color={PALETTE.muted} wrap="truncate-end">
+          turn {tokText(spent.run)} · session {tokText(spent.session)}
+        </Text>
+      )}
+      </Box>
     )
   })
 
@@ -349,6 +373,7 @@ export const register: Register = on => {
     const log = await read($, calls)
     const spent = await read($, usage)
     const configs = await read($, setups)
+    const spentAll = await read($, totals)
     const room = Math.max(6, (e.viewport?.rows ?? 24) - 4)
     const SHOWN_CALLS = 4
 
@@ -385,7 +410,7 @@ export const register: Register = on => {
       const cost = spent.find(x => x.agentId === id)
       return cost === undefined
         ? ''
-        : ` · ${tokens(cost.input + cost.output)} tok (${tokens(cost.input)} in / ${tokens(cost.output)} out)`
+        : ` · ${tokens(cost.input + cost.output)} tok (${tokens(cost.input)} in / ${tokens(cost.output)} out${cost.cached > 0 ? ` / ${tokens(cost.cached)} cached` : ''})`
     }
 
     // Main agent: its own area at the top, with a tally of tools by name.
@@ -453,6 +478,13 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
+        <Text dimColor wrap="truncate-end">
+          Session (all agents) · {tokText(spentAll.session)}
+        </Text>
+        <Text dimColor wrap="truncate-end">
+          This turn · {tokText(spentAll.run)}
+        </Text>
+        <Text> </Text>
         {main}
         <Text> </Text>
         <Text bold>

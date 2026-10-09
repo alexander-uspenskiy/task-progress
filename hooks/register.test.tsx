@@ -87,6 +87,10 @@ test('without a task list the estimate climbs with tool calls and stops short of
 })
 
 test('the pane lists a subagent with its tools, status and token usage', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
   const clock = mock.clock(on)
   mock.store(on)
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
@@ -94,7 +98,10 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   on('tool.call', () => ({ result: { text: 'ok' } }) as never)
   on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
   on('turn.step', async function* (_$, e) {
-    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
+    const usage = e.agentId
+      ? { model: 'm', input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+      : { model: 'm', input_tokens: 5000, output_tokens: 700, cache_read_input_tokens: 4000, cache_creation_input_tokens: 0 }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
   })
   on('agent.list', () =>
     ({
@@ -167,7 +174,18 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   expect(await pane.find({ type: 'Text', text: /abcdef12 · haiku-5-5 · effort high · running · 1 tools · 1\.5k tok/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /haiku-5-5 · effort high/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /TodoWrite/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /opus-5-5 · effort xhigh · 2 tools · 5\.7k tok/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /opus-5-5 · effort xhigh · 2 tools · 5\.7k tok \(5\.0k in \/ 700 out \/ 4\.0k cached\)/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /Bash×2/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Session \(all agents\) · 6\.2k in · 1\.0k out · 4\.0k cached/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /This turn · 6\.2k in · 1\.0k out · 4\.0k cached/ })).toBeDefined()
   await pane.unmount()
+
+  const band = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
+  expect(await band.find({ type: 'Text', text: /turn 6\.2k in · 1\.0k out · 4\.0k cached · session 6\.2k in/ })).toBeDefined()
+  await band.unmount()
+
+  await $.prompt.submit({ text: 'next' } as never)
+  const fresh = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
+  expect(await fresh.find({ type: 'Text', text: /turn 0 in · 0 out · 0 cached · session 6\.2k in/ })).toBeDefined()
+  await fresh.unmount()
 })
