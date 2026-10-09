@@ -18,6 +18,8 @@ export type Call = {
 export type Setup = { agentId: string; model: string; effort: string }
 export type Tok = { input: number; output: number; cached: number }
 export type Totals = { session: Tok; run: Tok }
+export type Seen = { turnId: string } & Tok
+export type Diag = { steps: number; withUsage: number; completes: number; error: string }
 export type Usage = { agentId: string; input: number; output: number; cached: number }
 export type Run = {
   startedAt: number
@@ -38,6 +40,8 @@ declare module 'claude-code' {
       usage: Usage[]
       setups: Setup[]
       totals: Totals
+      seen: Seen[]
+      diag: Diag
     }
   }
 }

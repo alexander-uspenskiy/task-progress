@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRow, Call, Run, Setup, Tok, Todo, Totals, Usage } from '../types'
+import type { AgentRow, Call, Run, Seen, Setup, Tok, Todo, Totals, Usage } from '../types'
 
 type Turn = { tools: number; seconds: number }
 
@@ -22,6 +22,15 @@ const NONE: Tok = { input: 0, output: 0, cached: 0 }
 const totals = atom({ plugin: 'task-progress', key: 'totals' } as const, {
   session: NONE,
   run: NONE,
+})
+// What each turn's own requests have already added, so a turn's closing
+// report only adds what they missed.
+const seen = atom({ plugin: 'task-progress', key: 'seen' } as const, [])
+const diag = atom({ plugin: 'task-progress', key: 'diag' } as const, {
+  steps: 0,
+  withUsage: 0,
+  completes: 0,
+  error: '',
 })
 const setups = atom({ plugin: 'task-progress', key: 'setups' } as const, [])
 const agents = atom({ plugin: 'task-progress', key: 'agents' } as const, [])
@@ -122,6 +131,20 @@ const measure = (list: Todo[], rows: AgentRow[]) => {
   }
   const done = rows.filter(a => FINISHED.includes(a.status)).length
   return { done, total: rows.length, label: rows.length > 0 ? 'subagents' : '' }
+}
+
+async function count($: EngineInterface, agentId: string, bump: Tok) {
+  const add = (t: Tok): Tok => ({
+    input: t.input + bump.input,
+    output: t.output + bump.output,
+    cached: t.cached + bump.cached,
+  })
+  await update($, totals, t => ({ session: add(t.session), run: add(t.run) }))
+  await update($, usage, list => {
+    const prev = list.find(x => x.agentId === agentId)
+    const sum: Usage = { agentId, ...add(prev ?? { ...NONE }) }
+    return [...list.filter(x => x.agentId !== agentId), sum]
+  })
 }
 
 async function refresh($: EngineInterface) {
@@ -225,22 +248,29 @@ export const register: Register = on => {
     const response = yield* next(e)
     try {
       const u = response.usage
+      await update($, diag, d => ({
+        ...d,
+        steps: d.steps + 1,
+        withUsage: d.withUsage + (u === null || u === undefined ? 0 : 1),
+      }))
       if (u !== null && u !== undefined) {
         const agentId = e.agentId ?? MAIN
-        const add = (t: Tok): Tok => ({
-          input: t.input + u.input_tokens,
-          output: t.output + u.output_tokens,
-          cached: t.cached + u.cache_read_input_tokens,
+        const turnId = e.turnId
+        const bump = { input: u.input_tokens, output: u.output_tokens, cached: u.cache_read_input_tokens }
+        await update($, seen, list => {
+          const prev = list.find(x => x.turnId === turnId)
+          const sum: Seen = {
+            turnId,
+            input: (prev?.input ?? 0) + bump.input,
+            output: (prev?.output ?? 0) + bump.output,
+            cached: (prev?.cached ?? 0) + bump.cached,
+          }
+          return [...list.filter(x => x.turnId !== turnId), sum].slice(-50)
         })
-        await update($, totals, t => ({ session: add(t.session), run: add(t.run) }))
-        await update($, usage, list => {
-          const prev = list.find(x => x.agentId === agentId)
-          const sum: Usage = { agentId, ...add(prev ?? { ...NONE }) }
-          return [...list.filter(x => x.agentId !== agentId), sum]
-        })
+        await count($, agentId, bump)
       }
-    } catch {
-      // a failed count must not fail the model request
+    } catch (err) {
+      await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
     }
     return response
   })
@@ -286,6 +316,26 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
+    // The turn's closing report is the authority on what it cost: add whatever
+    // its own requests did not already count.
+    try {
+      const u = e.usage
+      if (u !== undefined) {
+        const had = (await read($, seen)).find(x => x.turnId === e.turnId)
+        const missing = {
+          input: Math.max(0, u.input_tokens - (had?.input ?? 0)),
+          output: Math.max(0, u.output_tokens - (had?.output ?? 0)),
+          cached: Math.max(0, u.cache_read_input_tokens - (had?.cached ?? 0)),
+        }
+        if (missing.input + missing.output + missing.cached > 0) {
+          await count($, e.agentId ?? MAIN, missing)
+        }
+        await update($, seen, list => list.filter(x => x.turnId !== e.turnId))
+      }
+      await update($, diag, d => ({ ...d, completes: d.completes + 1 }))
+    } catch (err) {
+      await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
+    }
     // Only the main loop's end ends the run; a subagent's turn also ends here.
     if (e.agentId === undefined) {
       tick?.cancel()
@@ -374,6 +424,7 @@ export const register: Register = on => {
     const spent = await read($, usage)
     const configs = await read($, setups)
     const spentAll = await read($, totals)
+    const dg = await read($, diag)
     const room = Math.max(6, (e.viewport?.rows ?? 24) - 4)
     const SHOWN_CALLS = 4
 
@@ -493,6 +544,11 @@ export const register: Register = on => {
             : `Subagents · ${rows.length} total · ${running} active`}
         </Text>
         {blocks}
+        <Text> </Text>
+        <Text dimColor wrap="truncate-end">
+          counted: {dg.withUsage}/{dg.steps} requests · {dg.completes} turns
+          {dg.error === '' ? '' : ` · error: ${dg.error}`}
+        </Text>
       </Box>
     )
   })

@@ -189,3 +189,50 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   expect(await fresh.find({ type: 'Text', text: /turn 0 in · 0 out · 0 cached · session 6\.2k in/ })).toBeDefined()
   await fresh.unmount()
 })
+
+test('a turn whose requests report no usage is still counted from its closing report', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  mock.clock(on)
+  mock.store(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('agent.list', () => ({ value: [] }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
+  })
+
+  await $.prompt.submit({ text: 'go' } as never)
+  for await (const _chunk of $.turn.step({ turnId: 'z', index: 0, model: 'm', messageCount: 1 } as never)) {
+    // drain
+  }
+  await $.turn.complete({
+    answer: 'ok',
+    durationMs: 10,
+    isAborted: false,
+    turnId: 'z',
+    reason: 'answer',
+    usage: { model: 'm', input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 300, cache_creation_input_tokens: 0 },
+  } as never)
+
+  const pane = await $.ui.mount({
+    plugin: 'task-progress',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'task-agents',
+    props: {
+      title: 'Subagents',
+      isFocused: false,
+      bodyColumns: 80,
+      placement: 'dock',
+      scroll: { offset: 0, bodyRows: 20, total: 1 },
+      view: {},
+    },
+  } as never)
+  expect(await pane.find({ type: 'Text', text: /Session \(all agents\) · 100 in · 200 out · 300 cached/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /counted: 0\/1 requests · 1 turns/ })).toBeDefined()
+  await pane.unmount()
+})
