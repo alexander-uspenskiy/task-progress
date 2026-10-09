@@ -340,3 +340,49 @@ test('the real pricing page layout parses, and an Opus 5.5 request is priced fro
   expect(await pane.find({ type: 'Text', text: /500 out · est\. \$0\.04$/ })).toBeDefined()
   await pane.unmount()
 })
+
+test('each agent type gets its own small icon next to its status', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  mock.store(on)
+  on('http.fetch', () => ({ value: { status: 503, ok: false, headers: {}, text: '' } }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
+  })
+  on('agent.list', () =>
+    ({
+      value: [
+        { id: 'a1000000aaaa', description: 'find hooks', type: 'Explore', status: 'running' },
+        { id: 'a2000000aaaa', description: 'misc work', type: 'general-purpose', status: 'completed' },
+        { id: 'a3000000aaaa', description: 'design it', type: 'Plan', status: 'pending' },
+        { id: 'a4000000aaaa', description: 'check diff', type: 'code-reviewer', status: 'failed' },
+        { id: 'a5000000aaaa', description: 'write it', type: 'coder', status: 'idle' },
+        { id: 'a6000000aaaa', description: 'unknown', type: 'mystery', status: 'waiting' },
+      ],
+    }) as never,
+  )
+
+  await $.prompt.submit({ text: 'go' } as never)
+  await clock.advance(500)
+
+  // a tall pane, so all six cards fit
+  const pane = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 60 } } as never)
+  expect(await pane.find({ type: 'Text', text: /◐ 🔍/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /● 👷/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /○ 🔬/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /✗ 🧐/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◌ 💻/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◔ 🤖/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /▌ 🧠 Main agent/ })).toBeDefined()
+  await pane.unmount()
+
+  // a short pane cannot fit them all: it says how many it left out
+  const short = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 16 } } as never)
+  expect(await short.find({ type: 'Text', text: /older agents? not shown/ })).toBeDefined()
+  await short.unmount()
+})

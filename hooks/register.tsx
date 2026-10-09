@@ -99,6 +99,29 @@ const COLOR: Record<string, string> = {
 }
 const FINISHED = ['completed', 'failed', 'killed']
 
+// A small icon for the kind of agent. The first rule that matches the agent's
+// lowercased "<type> <name>" wins; edit or extend the list to taste. Single
+// code point emoji only: they keep their width in every terminal font.
+const ICON_RULES: [RegExp, string][] = [
+  [/explor|search|find/, '🔍'], // searches the code
+  [/plan|architect/, '🔬'], // architect
+  [/design/, '📐'],
+  [/review/, '🧐'],
+  [/test|qa/, '🧪'],
+  [/secur|audit/, '🔒'],
+  [/research|guide|doc/, '📖'],
+  [/status|config|setup/, '🔩'],
+  [/code|coder|engineer|develop|implement|build/, '💻'], // engineer
+  [/general|worker/, '👷'], // general-purpose worker
+  [/teammate/, '🤝'],
+]
+const MAIN_ICON = '🧠'
+const OTHER_ICON = '🤖'
+const kindIcon = (type: string, name: string) => {
+  const text = `${type} ${name}`.toLowerCase()
+  return ICON_RULES.find(([rule]) => rule.test(text))?.[1] ?? OTHER_ICON
+}
+
 const tokens = (n: number) =>
   n < 1000
     ? String(n)
@@ -625,7 +648,7 @@ export const register: Register = on => {
       4 + Math.min(mainCalls.length, mainShown) + (mainCalls.length > mainShown ? 1 : 0)
     const main = (
       <Box flexDirection="column">
-        {line('main', '▌ Main agent', setupText(MAIN) === '' ? '' : `  ${setupText(MAIN)}`, 'claude')}
+        {line('main', `▌ ${MAIN_ICON} Main agent`, setupText(MAIN) === '' ? '' : `  ${setupText(MAIN)}`, 'claude')}
         <Text dimColor wrap="truncate-end">{'    '}{costText(MAIN)}</Text>
         <Text dimColor wrap="truncate-end">
           {'    '}
@@ -655,7 +678,7 @@ export const register: Register = on => {
         <Box key={a.id} flexDirection="column">
           <Box>
             <Box flexShrink={0}>
-              <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} </Text>
+              <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} {kindIcon(a.type, a.name)} </Text>
             </Box>
             <Text bold dimColor={isOver} wrap="truncate-end">{name}{what}</Text>
           </Box>
@@ -689,6 +712,11 @@ export const register: Register = on => {
             : `Subagents · ${rows.length} total · ${running} active`}
         </Text>
         {blocks}
+        {blocks.length < rows.length && (
+          <Text dimColor>
+            {'  '}… {rows.length - blocks.length} older {rows.length - blocks.length === 1 ? 'agent' : 'agents'} not shown
+          </Text>
+        )}
         <Text> </Text>
         <Text dimColor wrap="truncate-end">
           counted: {dg.withUsage}/{dg.steps} requests · {dg.completes} turns ·{' '}
