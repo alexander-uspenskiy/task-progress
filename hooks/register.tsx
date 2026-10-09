@@ -5,6 +5,12 @@ import type { AgentRow, Run, Todo } from '../types'
 
 const PANE = 'task-agents'
 const BAR_WIDTH = 24
+const SWEEP = 6
+const TASK_HINT =
+  'The user has a progress bar above the prompt that follows your task list. ' +
+  'For work with three or more steps, create the steps first with TaskCreate ' +
+  '(one short subject each), mark each in_progress when you start it and ' +
+  'completed when it is done with TaskUpdate, so the bar shows real progress.'
 
 const todos = atom({ plugin: 'task-progress', key: 'todos' } as const, [])
 const agents = atom({ plugin: 'task-progress', key: 'agents' } as const, [])
@@ -12,6 +18,7 @@ const run = atom({ plugin: 'task-progress', key: 'run' } as const, {
   startedAt: 0,
   now: 0,
   isActive: false,
+  tools: 0,
 })
 
 const ICON: Record<string, string> = {
@@ -97,12 +104,31 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     const startedAt = await $.clock.now()
     await update($, todos, list => list.filter(t => t.status !== 'completed'))
-    await update($, run, () => ({ startedAt, now: startedAt, isActive: true }))
+    await update($, run, () => ({ startedAt, now: startedAt, isActive: true, tools: 0 }))
     void $.ui.open({ id: PANE, title: 'Subagents' })
     tick?.cancel()
     tick = $.clock.every(1000, () => void refresh($))
 
     return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', async ($, e, next) => {
+    await update($, run, r => ({ ...r, tools: r.tools + 1 }))
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    return {
+      sections: [
+        ...composed.sections,
+        {
+          id: 'task-progress:tasks',
+          scope: 'session' as const,
+          text: TASK_HINT,
+        },
+      ],
+    }
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
@@ -174,19 +200,36 @@ export const register: Register = on => {
 
     const isDone = total > 0 && done === total
     const fill = isDone ? PALETTE.done : PALETTE.fill
+    // Cells, not glyphs: a background-coloured space is the same solid bar in
+    // every font, where a line-drawing character turns into a hairline.
+    const cells = (n: number, color: string) =>
+      n > 0 ? <Text backgroundColor={color}>{' '.repeat(n)}</Text> : null
+    // No task list yet: a block sweeps along the track instead of a false 0%.
+    const lead = Math.floor((r.now - r.startedAt) / 1000) % (BAR_WIDTH - SWEEP + 1)
 
     return (
       <Box>
-        <Text color={fill}>{'━'.repeat(filled)}</Text>
-        <Text color={PALETTE.track}>{'━'.repeat(BAR_WIDTH - filled)}</Text>
+        {total === 0 ? (
+          <Box>
+            {cells(lead, PALETTE.track)}
+            {cells(SWEEP, fill)}
+            {cells(BAR_WIDTH - SWEEP - lead, PALETTE.track)}
+          </Box>
+        ) : (
+          <Box>
+            {cells(filled, fill)}
+            {cells(BAR_WIDTH - filled, PALETTE.track)}
+          </Box>
+        )}
         <Text bold color={fill}>
           {' '}
-          {total === 0 ? 'working…' : `${Math.round(ratio * 100)}%`}
+          {total === 0 ? 'working' : `${Math.round(ratio * 100)}%`}
         </Text>
         <Text color={PALETTE.text}>{total === 0 ? '' : ` ${done}/${total}`}</Text>
         <Text color={PALETTE.muted} wrap="truncate-end">
           {' '}
           · {elapsed}
+          {total === 0 ? ` · ${r.tools} tool calls` : ''}
           {label === '' ? '' : ` · ${label}`}
         </Text>
       </Box>
