@@ -3,11 +3,13 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRow, Run, Todo } from '../types'
 
+type Turn = { tools: number; seconds: number }
+
 const PANE = 'task-agents'
 const SEGMENTS = 20
 const TICK_MS = 400
 const TASK_HINT =
-  'The user has a progress bar above the prompt that follows your task list. ' +
+  'Reminder: the user has a progress bar above the prompt that follows your task list. ' +
   'For work with three or more steps, create the steps first with TaskCreate ' +
   '(one short subject each), mark each in_progress when you start it and ' +
   'completed when it is done with TaskUpdate, so the bar shows real progress.'
@@ -19,6 +21,8 @@ const run = atom({ plugin: 'task-progress', key: 'run' } as const, {
   now: 0,
   isActive: false,
   tools: 0,
+  expectedTools: 8,
+  expectedSeconds: 60,
 })
 
 const ICON: Record<string, string> = {
@@ -43,7 +47,6 @@ const ICON: Record<string, string> = {
 const PALETTE = {
   fill: 'claude',
   track: 'subtle',
-  trail: 'promptBorder',
   text: 'text',
   muted: 'inactive',
   done: 'success',
@@ -60,6 +63,22 @@ const FINISHED = ['completed', 'failed', 'killed']
 const clock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+const median = (xs: number[], fallback: number) => {
+  if (xs.length === 0) return fallback
+  const sorted = [...xs].sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)] ?? fallback
+}
+
+// No task list: guess how far along the turn is from what earlier turns cost.
+// Whichever of tool calls or time is further along sets the guess, never
+// past 95%, so the bar can only finish when the turn really does.
+const estimate = (r: Run) => {
+  const seconds = (r.now - r.startedAt) / 1000
+  const byTools = r.tools / (r.expectedTools * 1.3)
+  const byTime = seconds / (r.expectedSeconds * 1.3)
+  return Math.min(0.95, Math.max(byTools, byTime))
 }
 
 // Todos drive the bar when the model keeps a list; otherwise subagents do.
@@ -104,32 +123,28 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     const startedAt = await $.clock.now()
+    const history = ((await $.store.get('history')) ?? []) as Turn[]
+    const expectedTools = median(history.map(h => h.tools), 8)
+    const expectedSeconds = median(history.map(h => h.seconds), 60)
     await update($, todos, list => list.filter(t => t.status !== 'completed'))
-    await update($, run, () => ({ startedAt, now: startedAt, isActive: true, tools: 0 }))
+    await update($, run, () => ({
+      startedAt,
+      now: startedAt,
+      isActive: true,
+      tools: 0,
+      expectedTools: Math.max(3, expectedTools),
+      expectedSeconds: Math.max(15, expectedSeconds),
+    }))
     void $.ui.open({ id: PANE, title: 'Subagents' })
     tick?.cancel()
     tick = $.clock.every(TICK_MS, () => void refresh($))
 
-    return next(e)
+    return next({ ...e, context: [...(e.context ?? []), TASK_HINT] })
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
     await update($, run, r => ({ ...r, tools: r.tools + 1 }))
     return next(e)
-  }).catch(($, e, next) => next(e))
-
-  on('prompt.compose', async ($, e, next) => {
-    const composed = await next(e)
-    return {
-      sections: [
-        ...composed.sections,
-        {
-          id: 'task-progress:tasks',
-          scope: 'session' as const,
-          text: TASK_HINT,
-        },
-      ],
-    }
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
@@ -178,6 +193,12 @@ export const register: Register = on => {
       tick?.cancel()
       tick = undefined
       await refresh($)
+      const ended = await read($, run)
+      const seconds = Math.round((ended.now - ended.startedAt) / 1000)
+      if (ended.tools > 0 && ended.isActive) {
+        const history = ((await $.store.get('history')) ?? []) as Turn[]
+        await $.store.set('history', [...history, { tools: ended.tools, seconds }].slice(-20))
+      }
       await update($, run, r => ({ ...r, isActive: false }))
     }
     return next(e)
@@ -201,19 +222,13 @@ export const register: Register = on => {
     const fill = isDone ? PALETTE.done : PALETTE.fill
     const beat = Math.floor(r.now / TICK_MS)
 
-    // Segmented cells. A background-coloured space is the same solid block in
-    // every font, so the bar never depends on a glyph the font may not draw.
-    // Task list: filled segments, and the next one pulses as the work front.
-    // No list yet: a scanner bounces back and forth, leaving a faint trail.
-    const lit = Math.floor(ratio * SEGMENTS)
-    const period = 2 * (SEGMENTS - 1)
-    const at = beat % period
-    const head = at < SEGMENTS ? at : period - at
+    // Segmented cells: a background-coloured space is the same solid block in
+    // every font. Real progress from the task list when there is one, else the
+    // estimate above, marked with a `~`.
+    const isEstimate = total === 0
+    const shown = isEstimate ? estimate(r) : ratio
+    const lit = Math.floor(shown * SEGMENTS)
     const colorOf = (i: number) => {
-      if (total === 0) {
-        const away = Math.abs(i - head)
-        return away === 0 ? fill : away === 1 ? PALETTE.trail : PALETTE.track
-      }
       if (i < lit) return fill
       return i === lit && r.isActive && !isDone && beat % 2 === 0
         ? fill
@@ -225,7 +240,7 @@ export const register: Register = on => {
       bar.push(<Text key={`s${i}`} backgroundColor={colorOf(i)}>{' '}</Text>)
       if (i < SEGMENTS - 1) bar.push(<Text key={`g${i}`}>{' '}</Text>)
     }
-    const percent = total === 0 ? '--%' : `${Math.round(ratio * 100)}%`
+    const percent = `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
 
     return (
       <Box>
@@ -238,7 +253,7 @@ export const register: Register = on => {
         <Text color={PALETTE.muted} wrap="truncate-end">
           {' '}
           · {elapsed}
-          {total === 0 ? ` · ${r.tools} tool calls` : ''}
+          {isEstimate ? ` · ${r.tools} tool calls · estimated` : ''}
           {label === '' ? '' : ` · ${label}`}
         </Text>
       </Box>

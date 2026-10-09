@@ -18,6 +18,7 @@ test('band is hidden until a task starts, then follows TaskCreate/TaskUpdate', a
     return <Text>engine band</Text>
   })
   mock.clock(on)
+  mock.store(on)
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
   on('agent.list', () => [] as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
@@ -40,8 +41,7 @@ test('band is hidden until a task starts, then follows TaskCreate/TaskUpdate', a
     await $.prompt.submit({ text: 'do the thing' } as never)
     if (surface === 'terminal') {
       const waiting = await $.ui.mount({ plugin: 'task-progress', surface, ...BAND } as never)
-      expect(await waiting.find({ type: 'Text', text: /--%/ })).toBeDefined()
-      expect(await waiting.find({ type: 'Text', text: /0%/ })).toBeUndefined()
+      expect(await waiting.find({ type: 'Text', text: /~\d+%/ })).toBeDefined()
       await waiting.unmount()
     }
 
@@ -54,4 +54,34 @@ test('band is hidden until a task starts, then follows TaskCreate/TaskUpdate', a
     expect(await ui.find({ type: 'Text', text: /50%/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('without a task list the estimate climbs with tool calls and stops short of 100%', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  mock.clock(on)
+  mock.store(on, { history: [{ tools: 4, seconds: 30 }] })
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('agent.list', () => [] as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('tool.call', () => ({ result: { text: 'ok' } }) as never)
+
+  await $.prompt.submit({ text: 'go' } as never)
+  const percent = async () => {
+    const ui = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
+    const found = await ui.find({ type: 'Text', text: /~\d+%/ })
+    await ui.unmount()
+    return Number(/~(\d+)%/.exec(found?.text ?? '')?.[1])
+  }
+
+  const before = await percent()
+  for (let i = 0; i < 3; i++) await $.tool.call({ tool: 'Bash', command: 'true' } as never)
+  const mid = await percent()
+  for (let i = 0; i < 40; i++) await $.tool.call({ tool: 'Bash', command: 'true' } as never)
+  const late = await percent()
+
+  expect(mid).toBeGreaterThan(before)
+  expect(late).toBeLessThanOrEqual(95)
 })

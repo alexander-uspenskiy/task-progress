@@ -1,6 +1,13 @@
 export type Todo = { id: string; content: string; status: 'pending' | 'in_progress' | 'completed' }
 export type AgentRow = { id: string; label: string; type: string; status: string }
-export type Run = { startedAt: number; now: number; isActive: boolean; tools: number }
+export type Run = {
+  startedAt: number
+  now: number
+  isActive: boolean
+  tools: number
+  expectedTools: number
+  expectedSeconds: number
+}
 
 declare module 'claude-code' {
   interface PluginState {
