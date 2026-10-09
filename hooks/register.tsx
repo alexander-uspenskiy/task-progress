@@ -1,7 +1,19 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRow, Call, Run, Seen, Setup, Tok, Todo, Usage } from '../types'
+import type {
+  AgentRow,
+  Call,
+  Counts,
+  PriceRow,
+  Prices,
+  Run,
+  Seen,
+  Setup,
+  Tok,
+  Todo,
+  Usage,
+} from '../types'
 
 type Turn = { tools: number; seconds: number }
 
@@ -9,6 +21,12 @@ const PANE = 'task-agents'
 const MAIN = 'main'
 const SEGMENTS = 20
 const TICK_MS = 400
+const HOUR = 3_600_000
+const DAY = 24 * HOUR
+// Anthropic's own pricing page, published as markdown.
+// The page answers 403 to some generic client names, so say who is asking.
+const USER_AGENT = 'task-progress-mod (Claude Code plugin)'
+const PRICING_URL = 'https://platform.claude.com/docs/en/about-claude/pricing.md'
 const TASK_HINT =
   'Reminder: the user has a progress bar above the prompt that follows your task list. ' +
   'For work with three or more steps, create the steps first with TaskCreate ' +
@@ -19,12 +37,15 @@ const todos = atom({ plugin: 'task-progress', key: 'todos' } as const, [])
 const calls = atom({ plugin: 'task-progress', key: 'calls' } as const, [])
 // Per agent, for the whole session; the session total is their sum. (The key
 // is versioned so figures kept by earlier builds are not carried over.)
-const usage = atom({ plugin: 'task-progress', key: 'usage3' } as const, [])
-const NONE: Tok = { input: 0, output: 0, cached: 0, written: 0 }
+const usage = atom({ plugin: 'task-progress', key: 'usage4' } as const, [])
+const NONE: Tok = { input: 0, output: 0, cached: 0, written: 0, cost: 0, unpriced: 0 }
 // Everything since the last prompt, all agents.
-const turn = atom({ plugin: 'task-progress', key: 'turn3' } as const, NONE)
+const turn = atom({ plugin: 'task-progress', key: 'turn4' } as const, NONE)
 // What each turn's own requests have already added, so a turn's closing
 // report only adds what they missed.
+// List prices, fetched from Anthropic's pricing page and refreshed daily. Absent
+// until a fetch has worked: with no price for a model no cost is shown for it.
+const prices = atom({ plugin: 'task-progress', key: 'prices1' } as const, null)
 const seen = atom({ plugin: 'task-progress', key: 'seen2' } as const, [])
 const diag = atom({ plugin: 'task-progress', key: 'diag' } as const, {
   steps: 0,
@@ -89,6 +110,8 @@ const sumUsage = (list: Usage[]): Tok => ({
   output: list.reduce((n, x) => n + x.output, 0),
   cached: list.reduce((n, x) => n + x.cached, 0),
   written: list.reduce((n, x) => n + x.written, 0),
+  cost: list.reduce((n, x) => n + x.cost, 0),
+  unpriced: list.reduce((n, x) => n + x.unpriced, 0),
 })
 const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
 
@@ -110,8 +133,12 @@ const hintOf = (input: object) => {
 // input, and how much of it came from the cache.
 //   299.7k in (299.6k cached) · 1.1k out
 const fullInput = (t: Tok) => t.input + t.cached + t.written
+// 12 cents -> $0.12; the `+` says some requests had no price and are left out.
+const money = (n: number) =>
+  n < 0.01 ? '<$0.01' : n < 100 ? `$${n.toFixed(2)}` : `$${Math.round(n)}`
 const tokText = (t: Tok) =>
-  `${tokens(fullInput(t))} in${t.cached > 0 ? ` (${tokens(t.cached)} cached)` : ''} · ${tokens(t.output)} out`
+  `${tokens(fullInput(t))} in${t.cached > 0 ? ` (${tokens(t.cached)} cached)` : ''} · ${tokens(t.output)} out` +
+  (t.cost > 0 ? ` · est. ${money(t.cost)}${t.unpriced > 0 ? '+' : ''}` : '')
 
 // claude-haiku-5-5-20260101 -> haiku-5-5
 const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
@@ -153,19 +180,92 @@ const bumpOf = (u: {
   output_tokens: number
   cache_read_input_tokens: number
   cache_creation_input_tokens: number
-}): Tok => ({
+}): Counts => ({
   input: u.input_tokens,
   output: u.output_tokens,
   cached: u.cache_read_input_tokens,
   written: u.cache_creation_input_tokens,
 })
 
-async function count($: EngineInterface, agentId: string, bump: Tok) {
+// The pricing page's model table: one row per model, a second row for a
+// model's long-prompt rates. Anything that does not parse is left out.
+function parsePrices(md: string): PriceRow[] {
+  const rows: PriceRow[] = []
+  const price = (cell: string | undefined) => {
+    const m = /\$([\d.]+)/.exec(cell ?? '')
+    return m ? Number(m[1]) : NaN
+  }
+  for (const line of md.split('\n')) {
+    if (!line.startsWith('| Claude')) continue
+    const cells = line.split('|').slice(1, -1).map(c => c.trim())
+    if (cells.length < 6) continue
+    const label = (cells[0] ?? '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    const name = label.replace(/\([^)]*\)/g, '').trim().toLowerCase().replace(/^claude\s+/, '')
+    const over = /over ([\d,]+) tokens/.exec(label)
+    const row: PriceRow = {
+      id: `claude-${name.replace(/[\s.]+/g, '-')}`,
+      input: price(cells[1]),
+      write5m: price(cells[2]),
+      write1h: price(cells[3]),
+      cacheRead: price(cells[4]),
+      output: price(cells[5]),
+    }
+    if ([row.input, row.write5m, row.write1h, row.cacheRead, row.output].some(n => !(n >= 0))) continue
+    rows.push(over ? { ...row, over: Number((over[1] ?? '0').replace(/,/g, '')) } : row)
+  }
+  return rows
+}
+
+// What these tokens cost at the model's list price; undefined when the model
+// has no price, so the caller can leave it out.
+function costOf(list: Prices | null, model: string, c: Counts): number | undefined {
+  if (list === null) return undefined
+  const id = model.toLowerCase().replace(/\[.*\]$/, '').replace(/-\d{8}$/, '')
+  const rows = list.rows.filter(r => r.id === id)
+  const prompt = c.input + c.cached + c.written
+  const row = rows.find(r => r.over !== undefined && prompt > r.over) ?? rows.find(r => r.over === undefined)
+  if (row === undefined) return undefined
+  return (c.input * row.input + c.written * row.write5m + c.cached * row.cacheRead + c.output * row.output) / 1e6
+}
+
+// Load the saved prices, and fetch fresh ones when they are over a day old (a
+// failed fetch is not retried within the hour). Any failure leaves things as
+// they were: prices simply stay unknown, and no cost is shown.
+async function loadPrices($: EngineInterface) {
+  try {
+    const now = await $.clock.now()
+    const saved = (await $.store.get('prices')) as Prices | undefined
+    if (saved !== undefined && Array.isArray(saved.rows)) {
+      await update($, prices, () => saved)
+    }
+    const tried = Number((await $.store.get('pricesTriedAt')) ?? 0)
+    const isFresh = saved !== undefined && now - saved.fetchedAt < DAY
+    if (isFresh || now - tried < HOUR) return
+    await $.store.set('pricesTriedAt', now)
+    const res = await $.http.fetch(PRICING_URL, {
+      headers: { 'user-agent': USER_AGENT, accept: 'text/markdown' },
+    })
+    if (!res.ok) return
+    const rows = parsePrices(res.text)
+    if (rows.length < 5) return
+    const next: Prices = { fetchedAt: now, rows }
+    await $.store.set('prices', next)
+    await update($, prices, () => next)
+  } catch {
+    // keep whatever prices there were
+  }
+}
+
+async function count($: EngineInterface, agentId: string, c: Counts, model: string) {
+  const cost = costOf(await read($, prices), model, c)
+  const bump: Tok = { ...c, cost: cost ?? 0, unpriced: cost === undefined ? 1 : 0 }
   const add = (t: Tok): Tok => ({
     input: t.input + bump.input,
     output: t.output + bump.output,
     cached: t.cached + bump.cached,
     written: t.written + bump.written,
+    cost: t.cost + bump.cost,
+    unpriced: t.unpriced + bump.unpriced,
   })
   await update($, turn, add)
   await update($, usage, list => {
@@ -193,6 +293,7 @@ export const register: Register = on => {
   let tick: { cancel: () => void } | undefined
 
   on('session.start', async ($, e, next) => {
+    await loadPrices($)
     await $.command.register({
       name: 'task-agents',
       description: 'Open the agents pane (status of every agent)',
@@ -206,6 +307,7 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await loadPrices($)
     const startedAt = await $.clock.now()
     const history = ((await $.store.get('history')) ?? []) as Turn[]
     const expectedTools = median(history.map(h => h.tools), 8)
@@ -296,7 +398,7 @@ export const register: Register = on => {
           }
           return [...list.filter(x => x.turnId !== turnId), sum].slice(-50)
         })
-        await count($, agentId, bump)
+        await count($, agentId, bump, u.model)
       }
     } catch (err) {
       await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
@@ -352,14 +454,14 @@ export const register: Register = on => {
       if (u !== undefined) {
         const had = (await read($, seen)).find(x => x.turnId === e.turnId)
         const full = bumpOf(u)
-        const missing: Tok = {
+        const missing: Counts = {
           input: Math.max(0, full.input - (had?.input ?? 0)),
           output: Math.max(0, full.output - (had?.output ?? 0)),
           cached: Math.max(0, full.cached - (had?.cached ?? 0)),
           written: Math.max(0, full.written - (had?.written ?? 0)),
         }
         if (missing.input + missing.output + missing.cached + missing.written > 0) {
-          await count($, e.agentId ?? MAIN, missing)
+          await count($, e.agentId ?? MAIN, missing, u.model)
         }
         await update($, seen, list => list.filter(x => x.turnId !== e.turnId))
       }
@@ -457,6 +559,7 @@ export const register: Register = on => {
     const configs = await read($, setups)
     const thisTurn = await read($, turn)
     const dg = await read($, diag)
+    const known = await read($, prices)
     const session = sumUsage(spent)
     const room = Math.max(8, (e.viewport?.rows ?? 24) - 4)
     const SHOWN_CALLS = 4
@@ -588,7 +691,8 @@ export const register: Register = on => {
         {blocks}
         <Text> </Text>
         <Text dimColor wrap="truncate-end">
-          counted: {dg.withUsage}/{dg.steps} requests · {dg.completes} turns
+          counted: {dg.withUsage}/{dg.steps} requests · {dg.completes} turns ·{' '}
+          {known === null ? 'no prices' : `${known.rows.length} prices`}
           {dg.error === '' ? '' : ` · error: ${dg.error}`}
         </Text>
       </Box>

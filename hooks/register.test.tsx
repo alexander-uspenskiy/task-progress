@@ -239,3 +239,104 @@ test('a turn whose requests report no usage is still counted from its closing re
   expect(await pane.find({ type: 'Text', text: /counted: 0\/1 requests · 1 turns/ })).toBeDefined()
   await pane.unmount()
 })
+
+const PRICING_MD = [
+  '| Model | Base input tokens | 5m cache writes | 1h cache writes | Cache hits and refreshes | Output tokens |',
+  '| :-- | :-- | :-- | :-- | :-- | :-- |',
+  '| Claude Fable 5.1 | $10 / MTok | $12.50 / MTok | $20 / MTok | $0.25 / MTok<sup>1</sup> | $50 / MTok |',
+  '| Claude Opus 5.5 | $4 / MTok | $5 / MTok | $8 / MTok | $0.20 / MTok<sup>2</sup> | $20 / MTok |',
+  '| Claude Opus 5 | $5 / MTok | $6.25 / MTok | $10 / MTok | $0.50 / MTok | $25 / MTok |',
+  '| Claude Sonnet 5.5 | $2 / MTok | $2.50 / MTok | $4 / MTok | $0.10 / MTok<sup>2</sup> | $10 / MTok |',
+  '| Claude Haiku 5.5 (for prompts up to 100,000 tokens) | $0.10 / MTok | $0.125 / MTok | $0.20 / MTok | $0.01 / MTok | $0.50 / MTok |',
+  '| Claude Haiku 5.5 (for prompts over 100,000 tokens) | $0.50 / MTok | $0.625 / MTok | $1 / MTok | $0.05 / MTok | $2.50 / MTok |',
+].join('\n')
+
+const PANE = {
+  plugin: 'task-progress',
+  surface: 'terminal',
+  component: 'Pane',
+  requestId: 'task-agents',
+  props: {
+    title: 'Agents',
+    isFocused: false,
+    bodyColumns: 80,
+    placement: 'dock',
+    scroll: { offset: 0, bodyRows: 20, total: 1 },
+    view: {},
+  },
+} as const
+
+// One main-loop request on `model`: 1000 fresh, 100000 cached, 2000 written, 500 out.
+const spend = async ($: any, model: string) => {
+  for await (const _chunk of $.turn.step({ turnId: 'p', index: 0, model, messageCount: 1 })) {
+    // drain
+  }
+}
+
+const harness = (on: any, http: () => unknown, model: string) => {
+  mock.clock(on, { now: 1_800_000_000_000 })
+  mock.store(on)
+  on('http.fetch', http)
+  on('prompt.submit', (_$: any, e: any) => ({ text: e.text }))
+  on('agent.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('turn.step', async function* (_$: any, e: any) {
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      stopReason: 'end_turn',
+      usage: { model, input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 100000, cache_creation_input_tokens: 2000 },
+    }
+  })
+}
+
+test('with a price it shows an estimated cost, dated model ids and tiers included', async ($, on) => {
+  harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: PRICING_MD } }), 'claude-opus-5-5-20260101')
+  await $.prompt.submit({ text: 'go' } as never)
+  await spend($, 'claude-opus-5-5-20260101')
+
+  // (1000*4 + 2000*5 + 100000*0.2 + 500*20) / 1e6 = $0.044
+  const pane = await $.ui.mount(PANE as never)
+  expect(await pane.find({ type: 'Text', text: /^\s*103\.0k in \(100\.0k cached\) · 500 out · est\. \$0\.04$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /6 prices/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a model whose price is not on the page is left out, with no estimate', async ($, on) => {
+  harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: PRICING_MD } }), 'claude-unlisted-9')
+  await $.prompt.submit({ text: 'go' } as never)
+  await spend($, 'claude-unlisted-9')
+
+  const pane = await $.ui.mount(PANE as never)
+  expect(await pane.find({ type: 'Text', text: /^\s*103\.0k in \(100\.0k cached\) · 500 out$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /est\./ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('when the prices cannot be fetched nothing is estimated and nothing breaks', async ($, on) => {
+  harness(on, () => ({ value: { status: 503, ok: false, headers: {}, text: '' } }), 'claude-opus-5-5')
+  await $.prompt.submit({ text: 'go' } as never)
+  await spend($, 'claude-opus-5-5')
+
+  const pane = await $.ui.mount(PANE as never)
+  expect(await pane.find({ type: 'Text', text: /^\s*103\.0k in \(100\.0k cached\) · 500 out$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /est\./ })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /no prices/ })).toBeDefined()
+  await pane.unmount()
+})
+
+// The model table exactly as Anthropic's pricing page published it (links, footnote marks, notes and all).
+const REAL_PRICING_MD = "| Model                                                                                                                                | Base input tokens     | 5m cache writes | 1h cache writes | Cache hits and refreshes | Output tokens          |\n| Claude Fable 5.1                                                                                                                     | $10 / MTok            | $12.50 / MTok   | $20 / MTok      | $0.25 / MTok<sup>1</sup> | $50 / MTok             |\n| Claude Mythos 5.1 ([limited availability](https://support.claude.com/en/articles/14604842))                                          | $10 / MTok            | $12.50 / MTok   | $20 / MTok      | $0.25 / MTok<sup>1</sup> | $50 / MTok             |\n| Claude Fable 5                                                                                                                       | $10 / MTok            | $12.50 / MTok   | $20 / MTok      | $1 / MTok                | $50 / MTok             |\n| Claude Mythos 5 ([limited availability](https://support.claude.com/en/articles/14604842))                                            | $10 / MTok            | $12.50 / MTok   | $20 / MTok      | $1 / MTok                | $50 / MTok             |\n| Claude Opus 5.5                                                                                                                      | $4 / MTok             | $5 / MTok       | $8 / MTok       | $0.20 / MTok<sup>2</sup> | $20 / MTok             |\n| Claude Opus 5                                                                                                                        | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.8                                                                                                                      | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.7                                                                                                                      | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.6                                                                                                                      | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.5                                                                                                                      | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.1 ([retired, except on Bedrock and Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations)) | $15 / MTok            | $18.75 / MTok   | $30 / MTok      | $1.50 / MTok             | $75 / MTok             |\n| Claude Opus 4 ([retired, except on Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations))               | $15 / MTok            | $18.75 / MTok   | $30 / MTok      | $1.50 / MTok             | $75 / MTok             |\n| Claude Sonnet 5.5                                                                                                                    | $2 / MTok             | $2.50 / MTok    | $4 / MTok       | $0.10 / MTok<sup>2</sup> | $10 / MTok             |\n| Claude Sonnet 5                                                                                                                      | $2 / MTok<sup>3</sup> | $2.50 / MTok    | $4 / MTok       | $0.20 / MTok             | $10 / MTok<sup>3</sup> |\n| Claude Sonnet 4.6                                                                                                                    | $3 / MTok             | $3.75 / MTok    | $6 / MTok       | $0.30 / MTok             | $15 / MTok             |\n| Claude Sonnet 4.5                                                                                                                    | $3 / MTok             | $3.75 / MTok    | $6 / MTok       | $0.30 / MTok             | $15 / MTok             |\n| Claude Sonnet 4 ([retired, except on Bedrock and Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations)) | $3 / MTok             | $3.75 / MTok    | $6 / MTok       | $0.30 / MTok             | $15 / MTok             |\n| Claude Haiku 5.5 (for prompts up to 100,000 tokens)                                                                                  | $0.10 / MTok          | $0.125 / MTok   | $0.20 / MTok    | $0.01 / MTok             | $0.50 / MTok           |\n| Claude Haiku 5.5 (for prompts over 100,000 tokens)                                                                                   | $0.50 / MTok          | $0.625 / MTok   | $1 / MTok       | $0.05 / MTok             | $2.50 / MTok           |\n| Claude Haiku 4.5                                                                                                                     | $1 / MTok             | $1.25 / MTok    | $2 / MTok       | $0.10 / MTok             | $5 / MTok              |\n| Claude Haiku 3.5 ([retired, except on Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations))            | $0.80 / MTok          | $1 / MTok       | $1.60 / MTok    | $0.08 / MTok             | $4 / MTok              |"
+
+test('the real pricing page layout parses, and an Opus 5.5 request is priced from it', async ($, on) => {
+  harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: REAL_PRICING_MD } }), 'claude-opus-5-5')
+  await $.prompt.submit({ text: 'go' } as never)
+  await spend($, 'claude-opus-5-5')
+
+  const pane = await $.ui.mount(PANE as never)
+  expect(await pane.find({ type: 'Text', text: /21 prices/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /500 out · est\. \$0\.04$/ })).toBeDefined()
+  await pane.unmount()
+})

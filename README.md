@@ -22,6 +22,10 @@ claude plugin validate .
 claude plugin test .
 ```
 
+## Estimated cost
+
+Token figures get an `est. $` when a price is known. The mod reads Anthropic's pricing page (`platform.claude.com/docs/en/about-claude/pricing.md`) on first use, keeps the table in the plugin store and refreshes it when it is over a day old. If the page cannot be fetched, or a model is not on it, that cost is left out and nothing else changes (a `+` after the figure means some requests had no price). It is a list-price estimate: 5-minute cache writes are assumed, and batch or priority discounts, regional pricing and subscriptions are not applied.
+
 ## Check the token figures
 
 `scripts/check-usage.py` sums the usage the API reported in the session transcript, one row per prompt, so it can be compared with the bar's `turn 299.7k in (299.6k cached) · 1.1k out` line. `in` is the full input: the API's own `input_tokens` is only the fresh part, which for a long conversation is a handful of tokens because the rest is read from the cache.

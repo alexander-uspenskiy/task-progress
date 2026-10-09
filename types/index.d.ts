@@ -18,8 +18,21 @@ export type Call = {
 export type Setup = { agentId: string; model: string; effort: string }
 // input: tokens the API read as fresh input; cached: cache reads; written: cache writes.
 // The full input of a request is input + cached + written.
-export type Tok = { input: number; output: number; cached: number; written: number }
-export type Seen = { turnId: string } & Tok
+export type Counts = { input: number; output: number; cached: number; written: number }
+// cost: estimated USD of the requests that had a price; unpriced: requests that had none.
+export type Tok = Counts & { cost: number; unpriced: number }
+// One model's list prices, USD per million tokens. `over`: applies to prompts over that many tokens.
+export type PriceRow = {
+  id: string
+  input: number
+  write5m: number
+  write1h: number
+  cacheRead: number
+  output: number
+  over?: number
+}
+export type Prices = { fetchedAt: number; rows: PriceRow[] }
+export type Seen = { turnId: string } & Counts
 export type Diag = { steps: number; withUsage: number; completes: number; error: string }
 export type Usage = { agentId: string; input: number; output: number; cached: number }
 export type Run = {
@@ -38,9 +51,10 @@ declare module 'claude-code' {
       agents: AgentRow[]
       run: Run
       calls: Call[]
-      usage3: Usage[]
+      usage4: Usage[]
       setups: Setup[]
-      turn3: Tok
+      turn4: Tok
+      prices1: Prices | null
       seen2: Seen[]
       diag: Diag
     }
