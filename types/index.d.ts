@@ -1,5 +1,21 @@
 export type Todo = { id: string; content: string; status: 'pending' | 'in_progress' | 'completed' }
-export type AgentRow = { id: string; label: string; type: string; status: string }
+export type AgentRow = {
+  id: string
+  label: string
+  name: string
+  type: string
+  status: string
+}
+export type Call = {
+  id: string
+  agentId: string
+  tool: string
+  hint: string
+  status: 'running' | 'done' | 'error'
+  startedAt: number
+  ms: number
+}
+export type Usage = { agentId: string; input: number; output: number; cached: number }
 export type Run = {
   startedAt: number
   now: number
@@ -15,6 +31,8 @@ declare module 'claude-code' {
       todos: Todo[]
       agents: AgentRow[]
       run: Run
+      calls: Call[]
+      usage: Usage[]
     }
   }
 }

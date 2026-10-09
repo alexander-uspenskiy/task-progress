@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRow, Run, Todo } from '../types'
+import type { AgentRow, Call, Run, Todo, Usage } from '../types'
 
 type Turn = { tools: number; seconds: number }
 
@@ -15,6 +15,8 @@ const TASK_HINT =
   'completed when it is done with TaskUpdate, so the bar shows real progress.'
 
 const todos = atom({ plugin: 'task-progress', key: 'todos' } as const, [])
+const calls = atom({ plugin: 'task-progress', key: 'calls' } as const, [])
+const usage = atom({ plugin: 'task-progress', key: 'usage' } as const, [])
 const agents = atom({ plugin: 'task-progress', key: 'agents' } as const, [])
 const run = atom({ plugin: 'task-progress', key: 'run' } as const, {
   startedAt: 0,
@@ -60,6 +62,22 @@ const COLOR: Record<string, string> = {
 }
 const FINISHED = ['completed', 'failed', 'killed']
 
+const tokens = (n: number) => (n < 1000 ? String(n) : `${(n / 1000).toFixed(1)}k`)
+const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
+
+// The most telling argument of a tool call, as one short string for the pane.
+const hintOf = (input: object) => {
+  const o = input as Record<string, unknown>
+  for (const key of ['file_path', 'path', 'pattern', 'command', 'query', 'url', 'description']) {
+    const v = o[key]
+    if (typeof v === 'string' && v !== '') {
+      const one = v.replace(/\s+/g, ' ').trim()
+      return one.length > 36 ? `${one.slice(0, 35)}…` : one
+    }
+  }
+  return ''
+}
+
 const clock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
@@ -97,6 +115,7 @@ async function refresh($: EngineInterface) {
   const rows: AgentRow[] = list.map(a => ({
     id: a.id,
     label: a.description || a.name || a.type,
+    name: a.name ?? '',
     type: a.type,
     status: a.status,
   }))
@@ -144,7 +163,33 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     await update($, run, r => ({ ...r, tools: r.tools + 1 }))
-    return next(e)
+    if (e.agentId === undefined) {
+      return next(e)
+    }
+
+    // A subagent's call: log it running, then done or errored with its time.
+    // The bookkeeping can never throw once the tool has run.
+    const call: Call = {
+      id: e.tool_use_id,
+      agentId: e.agentId,
+      tool: String(e.tool),
+      hint: hintOf(e),
+      status: 'running',
+      startedAt: await $.clock.now(),
+      ms: 0,
+    }
+    await update($, calls, list => [...list, call].slice(-300))
+    const ran = await next(e)
+    try {
+      const ms = (await $.clock.now()) - call.startedAt
+      const status = ran.deny !== undefined || ran.isError === true ? 'error' : 'done'
+      await update($, calls, list =>
+        list.map(c => (c.id === call.id ? { ...c, status, ms } : c)),
+      )
+    } catch {
+      // a failed log line must not fail the tool call
+    }
+    return ran
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
@@ -188,7 +233,22 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e, next) => {
-    // Subagent turns also complete here; only the main loop ends the run.
+    // A subagent's turn ends here too: keep what it cost. Only the main loop
+    // ends the run.
+    if (e.agentId !== undefined && e.usage !== undefined) {
+      const agentId = e.agentId
+      const u = e.usage
+      await update($, usage, list => {
+        const prev = list.find(x => x.agentId === agentId)
+        const total: Usage = {
+          agentId,
+          input: (prev?.input ?? 0) + u.input_tokens,
+          output: (prev?.output ?? 0) + u.output_tokens,
+          cached: (prev?.cached ?? 0) + u.cache_read_input_tokens,
+        }
+        return [...list.filter(x => x.agentId !== agentId), total]
+      })
+    }
     if (e.agentId === undefined) {
       tick?.cancel()
       tick = undefined
@@ -263,31 +323,71 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const rows = await read($, agents)
-    const room = Math.max(1, (e.viewport?.rows ?? 24) - 4)
+    const log = await read($, calls)
+    const spent = await read($, usage)
+    const room = Math.max(4, (e.viewport?.rows ?? 24) - 4)
 
     if (rows.length === 0) {
       return <Text dimColor>No subagents yet.</Text>
     }
 
     const running = rows.filter(a => !FINISHED.includes(a.status)).length
+    const SHOWN_CALLS = 4
+
+    // Newest agent first; each takes a header and its last few tool calls,
+    // until the pane is full.
+    const blocks = []
+    let used = 0
+    for (const a of [...rows].reverse()) {
+      const mine = log.filter(c => c.agentId === a.id)
+      const recent = mine.slice(-SHOWN_CALLS)
+      const need = 1 + recent.length + (mine.length > recent.length ? 1 : 0)
+      if (used + need > room && blocks.length > 0) break
+      used += need
+      const cost = spent.find(x => x.agentId === a.id)
+      const isOver = FINISHED.includes(a.status)
+      blocks.push(
+        <Box key={a.id} flexDirection="column">
+          <Box>
+            <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} </Text>
+            <Text bold dimColor={isOver} wrap="truncate-end">
+              {a.name !== '' ? a.name : a.type}
+              {a.label !== '' && a.label !== a.type ? ` (${a.label})` : ` (${a.type})`}
+            </Text>
+            <Text dimColor>
+              {' '}
+              {a.id.slice(0, 8)} · {a.status} · {mine.length} tools
+              {cost === undefined
+                ? ''
+                : ` · ${tokens(cost.input + cost.output)} tok (${tokens(cost.input)} in / ${tokens(cost.output)} out)`}
+            </Text>
+          </Box>
+          {mine.length > recent.length && (
+            <Text dimColor>{'    '}… {mine.length - recent.length} earlier</Text>
+          )}
+          {recent.map(c => (
+            <Box key={c.id}>
+              <Text color={c.status === 'error' ? 'error' : c.status === 'done' ? 'success' : 'claude'}>
+                {'    '}
+                {c.status === 'error' ? '✗' : c.status === 'done' ? '✓' : '◐'}{' '}
+              </Text>
+              <Text>{c.tool}</Text>
+              <Text dimColor wrap="truncate-end">
+                {c.hint === '' ? '' : ` ${c.hint}`} ·{' '}
+                {c.status === 'running' ? 'running' : seconds(c.ms)}
+              </Text>
+            </Box>
+          ))}
+        </Box>,
+      )
+    }
 
     return (
       <Box flexDirection="column">
         <Text bold>
           {rows.length} subagents · {running} active
         </Text>
-        {rows.slice(-room).map(a => (
-          <Box key={a.id}>
-            <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} </Text>
-            <Text dimColor={FINISHED.includes(a.status)} wrap="truncate-end">
-              {a.label}
-            </Text>
-            <Text dimColor>
-              {' '}
-              {a.type} · {a.status}
-            </Text>
-          </Box>
-        ))}
+        {blocks}
       </Box>
     )
   })

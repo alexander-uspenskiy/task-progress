@@ -20,7 +20,7 @@ test('band is hidden until a task starts, then follows TaskCreate/TaskUpdate', a
   mock.clock(on)
   mock.store(on)
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
-  on('agent.list', () => [] as never)
+  on('agent.list', () => ({ value: [] }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   let n = 0
   on('tool.call', (_$, e) =>
@@ -64,7 +64,7 @@ test('without a task list the estimate climbs with tool calls and stops short of
   mock.clock(on)
   mock.store(on, { history: [{ tools: 4, seconds: 30 }] })
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
-  on('agent.list', () => [] as never)
+  on('agent.list', () => ({ value: [] }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('tool.call', () => ({ result: { text: 'ok' } }) as never)
 
@@ -84,4 +84,55 @@ test('without a task list the estimate climbs with tool calls and stops short of
 
   expect(mid).toBeGreaterThan(before)
   expect(late).toBeLessThanOrEqual(95)
+})
+
+test('the pane lists a subagent with its tools, status and token usage', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('tool.call', () => ({ result: { text: 'ok' } }) as never)
+  on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+  on('agent.list', () =>
+    ({
+      value: [{ id: 'abcdef123456', description: 'find hooks', type: 'Explore', status: 'running' }],
+    }) as never,
+  )
+
+  await $.prompt.submit({ text: 'go' } as never)
+  await $.tool.call({
+    tool: 'Grep',
+    pattern: 'TodoWrite',
+    tool_use_id: 't1',
+    agentId: 'abcdef123456',
+  } as never)
+  await $.turn.complete({
+    answer: 'done',
+    durationMs: 10,
+    isAborted: false,
+    turnId: 'x',
+    reason: 'answer',
+    agentId: 'abcdef123456',
+    usage: { model: 'm', input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  } as never)
+  await clock.advance(500)
+
+  const pane = await $.ui.mount({
+    plugin: 'task-progress',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'task-agents',
+    props: {
+      title: 'Subagents',
+      isFocused: false,
+      bodyColumns: 80,
+      placement: 'dock',
+      scroll: { offset: 0, bodyRows: 20, total: 1 },
+      view: {},
+    },
+  } as never)
+  expect(await pane.find({ type: 'Text', text: /Explore \(find hooks\)/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /abcdef12 · running · 1 tools · 1\.5k tok/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /TodoWrite/ })).toBeDefined()
+  await pane.unmount()
 })
