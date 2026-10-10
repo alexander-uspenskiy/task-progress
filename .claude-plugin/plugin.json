@@ -1,6 +1,6 @@
 {
   "name": "task-progress",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Progress bar above the prompt while a task runs, plus an agents pane with the main agent and every subagent, their tools, status and token usage, with an estimated cost from Anthropic's list prices.",
   "types": "./types/index.d.ts",
   "author": {
