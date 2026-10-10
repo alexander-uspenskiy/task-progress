@@ -148,25 +148,40 @@ const tokens = (n: number) =>
     : n < 1_000_000
       ? `${(n / 1000).toFixed(1)}k`
       : `${(n / 1_000_000).toFixed(1)}M`
+// Every figure that is read from a file, the store or an event is untrusted: it is
+// coerced to a finite, non-negative number no larger than a limit.
+const TOK_MAX = 1e12
+const COST_MAX = 1e9
+const num = (v: unknown, max = TOK_MAX) =>
+  typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(v, max) : 0
+const isObj = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+const cap = (n: number) => Math.min(TOK_MAX, n)
+const capCost = (n: number) => Math.min(COST_MAX, n)
 const sumUsage = (list: Usage[]): Tok => ({
-  input: list.reduce((n, x) => n + x.input, 0),
-  output: list.reduce((n, x) => n + x.output, 0),
-  cached: list.reduce((n, x) => n + x.cached, 0),
-  written: list.reduce((n, x) => n + x.written, 0),
-  cost: list.reduce((n, x) => n + x.cost, 0),
-  unpriced: list.reduce((n, x) => n + x.unpriced, 0),
+  input: cap(list.reduce((n, x) => n + x.input, 0)),
+  output: cap(list.reduce((n, x) => n + x.output, 0)),
+  cached: cap(list.reduce((n, x) => n + x.cached, 0)),
+  written: cap(list.reduce((n, x) => n + x.written, 0)),
+  cost: capCost(list.reduce((n, x) => n + x.cost, 0)),
+  unpriced: cap(list.reduce((n, x) => n + x.unpriced, 0)),
 })
 const addTok = (t: Tok, b: Tok): Tok => ({
-  input: t.input + b.input,
-  output: t.output + b.output,
-  cached: t.cached + b.cached,
-  written: t.written + b.written,
-  cost: t.cost + b.cost,
-  unpriced: t.unpriced + b.unpriced,
+  input: cap(t.input + b.input),
+  output: cap(t.output + b.output),
+  cached: cap(t.cached + b.cached),
+  written: cap(t.written + b.written),
+  cost: capCost(t.cost + b.cost),
+  unpriced: cap(t.unpriced + b.unpriced),
 })
 // Other agents kept in the per-agent lists (the main agent is always kept).
 const KEEP_AGENTS = 40
 const KEEP_SEEN = 50
+// What is accepted back from the store, whatever it says.
+const MAX_AGENTS = 100
+const MAX_SEEN = 100
+const MAX_HISTORY = 40
+const ID_MAX = 200
 // Oldest first out: the lists put the newest entry last.
 const prune = <T extends { agentId: string }>(list: T[]): T[] => {
   const others = list.filter(x => x.agentId !== MAIN)
@@ -174,15 +189,42 @@ const prune = <T extends { agentId: string }>(list: T[]): T[] => {
   const gone = new Set(others.slice(0, others.length - KEEP_AGENTS))
   return list.filter(x => !gone.has(x))
 }
+const cleanCounts = (o: Record<string, unknown>): Counts => ({
+  input: num(o.input),
+  output: num(o.output),
+  cached: num(o.cached),
+  written: num(o.written),
+})
+const cleanTok = (v: unknown): Tok => {
+  const o = isObj(v) ? v : {}
+  return { ...cleanCounts(o), cost: num(o.cost, COST_MAX), unpriced: num(o.unpriced) }
+}
+const isKey = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= ID_MAX
 // One request's tokens, added to the turn and the agent (and to what the
 // turn's own requests have counted, when they say which turn they are).
 // A ledger written by an older build may lack fields a newer one reads: fill them in.
-const norm = (l: Partial<Ledger> | undefined): Ledger => ({
-  turn: { ...NONE, ...(l?.turn ?? {}) },
-  agents: (l?.agents ?? []).map(a => ({ ...NONE, ...a })),
-  seen: l?.seen ?? [],
-  retired: { ...NONE, ...(l?.retired ?? {}) },
-})
+// One read back from the store may say anything: every field is coerced, entries of
+// the wrong shape are dropped and the lists are capped.
+const norm = (l: unknown): Ledger => {
+  const o = isObj(l) ? l : {}
+  const agents: Usage[] = []
+  for (const a of Array.isArray(o.agents) ? o.agents : []) {
+    if (isObj(a) && isKey(a.agentId)) agents.push({ agentId: a.agentId, ...cleanTok(a) })
+  }
+  // too many: the oldest of the other agents go first
+  let excess = agents.length - MAX_AGENTS
+  const kept = excess <= 0 ? agents : agents.filter(a => a.agentId === MAIN || excess-- <= 0)
+  const seen: Seen[] = []
+  for (const x of Array.isArray(o.seen) ? o.seen : []) {
+    if (isObj(x) && isKey(x.turnId)) seen.push({ turnId: x.turnId, ...cleanCounts(x) })
+  }
+  return {
+    turn: cleanTok(o.turn),
+    agents: kept,
+    seen: seen.slice(-MAX_SEEN),
+    retired: cleanTok(o.retired),
+  }
+}
 const tally = (old: Ledger, agentId: string, b: Tok, turnId?: string): Ledger => {
   const l = norm(old)
   const prev = l.agents.find(x => x.agentId === agentId)
@@ -314,9 +356,19 @@ const clock = (ms: number) => {
 }
 
 const median = (xs: number[], fallback: number) => {
-  if (xs.length === 0) return fallback
-  const sorted = [...xs].sort((a, b) => a - b)
+  const good = xs.filter(x => typeof x === 'number' && Number.isFinite(x) && x >= 0)
+  if (good.length === 0) return fallback
+  const sorted = good.sort((a, b) => a - b)
   return sorted[Math.floor(sorted.length / 2)] ?? fallback
+}
+// The turns kept in the store, read back: whatever it says, a list of sane turns.
+const cleanHistory = (v: unknown): Turn[] => {
+  const out: Turn[] = []
+  for (const t of Array.isArray(v) ? v : []) {
+    if (!isObj(t)) continue
+    out.push({ tools: num(t.tools, 1e6), seconds: num(t.seconds, 1e7) })
+  }
+  return out.slice(-MAX_HISTORY)
 }
 
 // No task list: guess how far along the turn is from what earlier turns cost.
@@ -324,9 +376,10 @@ const median = (xs: number[], fallback: number) => {
 // past 95%, so the bar can only finish when the turn really does.
 const estimate = (r: Run) => {
   const seconds = (r.now - r.startedAt) / 1000
-  const byTools = r.tools / (r.expectedTools * 1.3)
-  const byTime = seconds / (r.expectedSeconds * 1.3)
-  return Math.min(0.95, Math.max(byTools, byTime))
+  const byTools = r.tools / (Math.max(1, r.expectedTools) * 1.3)
+  const byTime = seconds / (Math.max(1, r.expectedSeconds) * 1.3)
+  const shown = Math.max(byTools, byTime)
+  return Number.isFinite(shown) ? Math.min(0.95, Math.max(0, shown)) : 0
 }
 
 // Todos drive the bar when the model keeps a list; otherwise subagents do.
@@ -346,10 +399,10 @@ const bumpOf = (u: {
   cache_read_input_tokens: number
   cache_creation_input_tokens: number
 }): Counts => ({
-  input: u.input_tokens,
-  output: u.output_tokens,
-  cached: u.cache_read_input_tokens,
-  written: u.cache_creation_input_tokens,
+  input: num(u.input_tokens),
+  output: num(u.output_tokens),
+  cached: num(u.cache_read_input_tokens),
+  written: num(u.cache_creation_input_tokens),
 })
 
 // The pricing page's model table: one row per model, a second row for a
@@ -396,13 +449,41 @@ function parsePrices(md: string): PriceRow[] {
 // All cache writes are priced at the 5-minute rate: the engine's ModelUsage reports one
 // cache_creation_input_tokens count per request, with no 5m/1h split.
 function costOf(list: Prices | null, model: string, c: Counts): number | undefined {
-  if (list === null) return undefined
-  const id = model.toLowerCase().replace(/\[.*\]$/, '').replace(/-\d{8}$/, '')
-  const rows = list.rows.filter(r => r.id === id)
+  if (!isObj(list) || !Array.isArray(list.rows) || typeof model !== 'string') return undefined
+  // a trailing "[1m]" is cut by position (a pattern over a hostile string could be slow)
+  const open = model.indexOf('[')
+  const id = (open < 0 ? model : model.slice(0, open)).toLowerCase().replace(/-\d{8}$/, '')
+  const rows = list.rows.filter(r => isObj(r) && r.id === id)
   const prompt = c.input + c.cached + c.written
   const row = rows.find(r => r.over !== undefined && prompt > r.over) ?? rows.find(r => r.over === undefined)
   if (row === undefined) return undefined
-  return (c.input * row.input + c.written * row.write5m + c.cached * row.cacheRead + c.output * row.output) / 1e6
+  const p = (n: unknown) => num(n, PRICE_MAX)
+  return capCost((c.input * p(row.input) + c.written * p(row.write5m) + c.cached * p(row.cacheRead) + c.output * p(row.output)) / 1e6)
+}
+// A price row read back from the store: only a row that is whole and in range is kept.
+const cleanPrices = (v: unknown): Prices | null => {
+  if (!isObj(v) || !Array.isArray(v.rows)) return null
+  const rows: PriceRow[] = []
+  for (const r of v.rows.slice(0, ROWS_MAX)) {
+    if (!isObj(r) || typeof r.id !== 'string' || r.id.length === 0 || r.id.length > 100) continue
+    const f = [r.input, r.write5m, r.write1h, r.cacheRead, r.output]
+    if (!f.every(n => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= PRICE_MAX)) continue
+    const row: PriceRow = {
+      id: r.id,
+      input: r.input as number,
+      write5m: r.write5m as number,
+      write1h: r.write1h as number,
+      cacheRead: r.cacheRead as number,
+      output: r.output as number,
+    }
+    if (r.over !== undefined) {
+      if (typeof r.over !== 'number' || !Number.isFinite(r.over) || r.over < 0 || r.over > TOK_MAX) continue
+      row.over = r.over
+    }
+    rows.push(row)
+  }
+  const at = v.fetchedAt
+  return { fetchedAt: typeof at === 'number' && Number.isFinite(at) && at > 0 ? at : 0, rows }
 }
 
 // The pricing page, or undefined when it has not answered within
@@ -429,13 +510,16 @@ async function fetchPage($: EngineInterface) {
 async function loadPrices($: EngineInterface) {
   try {
     const now = await $.clock.now()
-    const saved = (await $.store.get('prices')) as Prices | undefined
-    if (saved !== undefined && Array.isArray(saved.rows)) {
+    const saved = cleanPrices(await $.store.get('prices'))
+    if (saved !== null) {
       await update($, prices, () => saved)
     }
-    const tried = Number((await $.store.get('pricesTriedAt')) ?? 0)
-    const isFresh = saved !== undefined && now - saved.fetchedAt < DAY
-    if (isFresh || now - tried < HOUR) return
+    const triedAt = await $.store.get('pricesTriedAt')
+    const tried = typeof triedAt === 'number' && Number.isFinite(triedAt) ? triedAt : 0
+    const age = saved === null ? -1 : now - saved.fetchedAt
+    // a date in the future is not fresh
+    const isFresh = age >= 0 && age < DAY
+    if (isFresh || (now - tried >= 0 && now - tried < HOUR)) return
     await $.store.set('pricesTriedAt', now)
     const res = await fetchPage($)
     if (res === undefined || !res.ok) return
@@ -506,10 +590,24 @@ const SAVED = 'ledger:'
 const KEEP_SAVED = 8
 let savedJson = ''
 let savedAt = 0
-// per subagent: how many times its transcript was tried, and when last
+// The session id whose saved copy session.end has deleted: nothing is written under it
+// again (a late save must not bring the key back) until a session.start. '*': whichever.
+let endedId: string | undefined
+// per subagent: how many times its transcript was tried, and when last (the newest 200)
 const attempts = new Map<string, { n: number; at: number }>()
+const MAX_ATTEMPTS = 200
 const RETRY_MS = 5000
 const MAX_TRIES = 5
+const noteAttempt = (id: string, v: { n: number; at: number }) => {
+  attempts.delete(id)
+  attempts.set(id, v)
+  while (attempts.size > MAX_ATTEMPTS) {
+    for (const oldest of attempts.keys()) {
+      attempts.delete(oldest)
+      break
+    }
+  }
+}
 async function saveLedger($: EngineInterface, force = false) {
   try {
     const now = await $.clock.now()
@@ -517,15 +615,17 @@ async function saveLedger($: EngineInterface, force = false) {
     const l = norm(await read($, ledger))
     const json = JSON.stringify(l)
     if (json === savedJson) return
+    const key = `${SAVED}${await $.session.id()}`
+    if (endedId === '*' || key === `${SAVED}${endedId}`) return
     savedJson = json
     savedAt = now
-    await $.store.set(`${SAVED}${await $.session.id()}`, { at: now, ledger: l })
-    const keys = (await $.store.keys()).filter(k => k.startsWith(SAVED))
+    await $.store.set(key, { at: now, ledger: l })
+    const keys = ((await $.store.keys()) ?? []).filter(k => typeof k === 'string' && k.startsWith(SAVED))
     if (keys.length > KEEP_SAVED) {
       const rows: { k: string; at: number }[] = []
       for (const k of keys) {
-        const v = (await $.store.get(k)) as { at?: number } | undefined
-        rows.push({ k, at: Number(v?.at ?? 0) })
+        const v = await $.store.get(k)
+        rows.push({ k, at: isObj(v) ? num(v.at, Number.MAX_SAFE_INTEGER) : 0 })
       }
       rows.sort((a, b) => a.at - b.at)
       for (const r of rows.slice(0, rows.length - KEEP_SAVED)) await $.store.delete(r.k)
@@ -539,8 +639,8 @@ async function restoreLedger($: EngineInterface) {
   try {
     const l = norm(await read($, ledger))
     if (l.agents.length > 0 || l.retired.input + l.retired.output + l.retired.cached > 0) return
-    const saved = (await $.store.get(`${SAVED}${await $.session.id()}`)) as { ledger?: Partial<Ledger> } | undefined
-    if (saved?.ledger === undefined) return
+    const saved = await $.store.get(`${SAVED}${await $.session.id()}`)
+    if (!isObj(saved) || !isObj(saved.ledger)) return
     await update($, ledger, () => norm(saved.ledger))
     savedJson = ''
   } catch {
@@ -566,32 +666,109 @@ async function noteSetup($: EngineInterface, agentId: string, model: string, eff
 // What a subagent's own transcript says it used (the API's usage, once per message).
 // The model requests of a subagent may not reach this plugin's hooks, so when it
 // stops, anything the live counting missed is added from here.
-const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0)
-async function creditTranscript($: EngineInterface, agentId: string, path: string) {
+// The transcript is hostile input: a line that is not what it should be is skipped (never
+// thrown at), every number is clamped, and the work is bounded.
+const TRANSCRIPT_LIMIT = 4 * 1024 * 1024 // the most one `$.fs.read` returns
+const MAX_LINES = 300_000
+const MAX_LINE_CHARS = 2_000_000
+const MODEL_MAX = 80
+const cleanModel = (v: unknown) =>
+  typeof v === 'string' ? v.slice(0, MODEL_MAX).replace(/[^A-Za-z0-9._[\]-]/g, '') : ''
+
+// An error as one short line for the pane: the home directory is `~`, any word that
+// looks like a path is `…`, and it is cut short.
+function scrub(err: unknown, home: string): string {
+  let text: string
   try {
-    const text = await $.fs.read(path)
+    text = err instanceof Error ? err.message : String(err)
+  } catch {
+    text = 'error'
+  }
+  text = text.slice(0, 400)
+  if (home.length > 1) text = text.split(home).join('~')
+  return text
+    .split(/\s+/)
+    .map(w => (w.includes('/') || w.includes('\\') ? '…' : w))
+    .join(' ')
+    .slice(0, 100)
+}
+async function noteError($: EngineInterface, label: string, err: unknown) {
+  try {
+    let home = ''
+    try {
+      home = String((await $.env.get('HOME')) ?? '')
+    } catch {
+      // no home to hide
+    }
+    const text = `${label}${scrub(err, home)}`.slice(0, 120)
+    await update($, diag, d => ({ ...d, error: text }))
+  } catch {
+    // an error note must not raise one
+  }
+}
+
+// ok: read and counted; over: too big to read, never tried again; failed: not read.
+async function creditTranscript($: EngineInterface, agentId: string, path: string): Promise<'ok' | 'over' | 'failed'> {
+  const over = async () => {
+    noteAttempt(agentId, { n: MAX_TRIES, at: 0 })
+    await update($, diag, d => ({ ...d, error: 'transcript over 4 MiB, not counted' }))
+    return 'over' as const
+  }
+  try {
+    if (typeof path !== 'string' || path.length === 0 || path.length > 4096) return 'failed'
+    // `$.fs.read` takes no offset or length, so a file over its limit cannot be read in
+    // part: ask its size first (an answer that cannot be had leaves it to the read).
+    try {
+      const st = await $.fs.stat(path)
+      if (st.kind === 'file' && st.size > TRANSCRIPT_LIMIT) return await over()
+    } catch {
+      // the read below says what is wrong
+    }
+    let text: unknown
+    try {
+      text = await $.fs.read(path)
+    } catch (err) {
+      let said = ''
+      try {
+        said = err instanceof Error ? err.message : String(err)
+      } catch {
+        // unreadable message
+      }
+      if (/4\s*MiB|too (?:large|big)|exceeds?\b/i.test(said.slice(0, 400))) return await over()
+      throw err
+    }
+    if (typeof text !== 'string') return 'failed'
     const list = await read($, prices)
     // A message is written several times as it streams, the first lines with partial
     // counts (an output of 16 that ends at 196): keep the largest of each field.
     const byMessage = new Map<string, { model: string; c: Counts }>()
-    for (const line of text.split('\n')) {
-      if (line.length === 0 || line.length > 2_000_000) continue
-      let row: { type?: string; message?: { id?: string; model?: string; usage?: Record<string, unknown> } }
+    let pos = 0
+    for (let n = 0; n < MAX_LINES && pos <= text.length; n++) {
+      let end = text.indexOf('\n', pos)
+      if (end < 0) end = text.length
+      const line = text.slice(pos, end)
+      pos = end + 1
+      if (line.length === 0 || line.length > MAX_LINE_CHARS) continue
+      let row: unknown
       try {
         row = JSON.parse(line)
       } catch {
         continue
       }
+      if (!isObj(row) || row.type !== 'assistant') continue
       const m = row.message
-      if (row.type !== 'assistant' || m === undefined || m.usage === undefined || typeof m.id !== 'string') continue
-      const seen = byMessage.get(m.id)
+      if (!isObj(m)) continue
+      const u = m.usage
+      const id = m.id
+      if (!isObj(u) || typeof id !== 'string' || id.length > ID_MAX) continue
+      const seen = byMessage.get(id)
       const c: Counts = {
-        input: Math.max(seen?.c.input ?? 0, num(m.usage.input_tokens)),
-        output: Math.max(seen?.c.output ?? 0, num(m.usage.output_tokens)),
-        cached: Math.max(seen?.c.cached ?? 0, num(m.usage.cache_read_input_tokens)),
-        written: Math.max(seen?.c.written ?? 0, num(m.usage.cache_creation_input_tokens)),
+        input: Math.max(seen?.c.input ?? 0, num(u.input_tokens)),
+        output: Math.max(seen?.c.output ?? 0, num(u.output_tokens)),
+        cached: Math.max(seen?.c.cached ?? 0, num(u.cache_read_input_tokens)),
+        written: Math.max(seen?.c.written ?? 0, num(u.cache_creation_input_tokens)),
       }
-      byMessage.set(m.id, { model: String(m.model ?? seen?.model ?? ''), c })
+      byMessage.set(id, { model: cleanModel(m.model) || (seen?.model ?? ''), c })
     }
     let total: Tok = NONE
     let lastModel = ''
@@ -621,21 +798,31 @@ async function creditTranscript($: EngineInterface, agentId: string, path: strin
     })
     if (added) await update($, diag, d => ({ ...d, transcripts: d.transcripts + 1 }))
     await noteSetup($, agentId, lastModel)
+    return 'ok'
   } catch (err) {
-    await update($, diag, d => ({ ...d, error: `transcript: ${String(err).slice(0, 100)}` }))
+    await noteError($, 'transcript: ', err)
+    return 'failed'
   }
 }
+
+// An agent id becomes part of a file name: only a plain one is accepted.
+const SAFE_ID = /^[\w@.-]{1,128}$/
+const isSafeId = (id: unknown): id is string => typeof id === 'string' && SAFE_ID.test(id) && !id.includes('..')
+const isSafeName = (n: unknown): n is string =>
+  typeof n === 'string' && n !== '' && !n.includes('/') && !n.includes('\\') && !n.includes('..')
 
 // Where a subagent's transcript is: <home>/.claude/projects/<project>/<session id>/
 // subagents/agent-<id>.jsonl. The project folder is named after the directory the
 // session started in, so each project folder is looked in for this session's id.
 async function findTranscript($: EngineInterface, agentId: string): Promise<string | undefined> {
+  if (!isSafeId(agentId)) return undefined
   const home = await $.env.get('HOME')
   if (home === undefined || home === '') return undefined
   const sid = await $.session.id()
+  if (!isSafeName(sid)) return undefined
   const root = `${home}/.claude/projects`
   for (const dir of await $.fs.list(root)) {
-    if (dir.kind !== 'dir') continue
+    if (dir.kind !== 'dir' || !isSafeName(dir.name)) continue
     const path = `${root}/${dir.name}/${sid}/subagents/agent-${agentId}.jsonl`
     if (await $.fs.exists(path)) return path
   }
@@ -648,10 +835,11 @@ async function findTranscript($: EngineInterface, agentId: string): Promise<stri
 // `base`: the session transcript's path without `.jsonl`, when it is known.
 async function backfillSeats($: EngineInterface, base?: string) {
   try {
+    if (base !== undefined && (typeof base !== 'string' || base.length > 4096)) return
     const seats = await read($, roster)
     const l = norm(await read($, ledger))
-    for (const s of seats) {
-      if (s.endedAt === 0) continue
+    for (const s of Array.isArray(seats) ? seats : []) {
+      if (!isObj(s) || !isSafeId(s.id) || s.endedAt === 0) continue
       if ((l.agents.find(x => x.agentId === s.id)?.output ?? 0) > 0) continue
       const now = await $.clock.now()
       const tried = attempts.get(s.id)
@@ -659,13 +847,20 @@ async function backfillSeats($: EngineInterface, base?: string) {
       // (a path handed over by the end of a turn is tried whenever it comes; only the
       // search of the project folders is spaced out)
       if (tried !== undefined && (tried.n >= MAX_TRIES || (base === undefined && now - tried.at < RETRY_MS))) continue
-      attempts.set(s.id, { n: (tried?.n ?? 0) + 1, at: now })
+      noteAttempt(s.id, { n: (tried?.n ?? 0) + 1, at: now })
       const path = base === undefined ? await findTranscript($, s.id) : `${base}/subagents/agent-${s.id}.jsonl`
       if (path !== undefined) await creditTranscript($, s.id, path)
     }
   } catch {
     // nothing to backfill
   }
+}
+
+// A subagent's stop does its file work from a timer (see the hook): off the path of
+// the event it answers.
+async function creditAndSave($: EngineInterface, agentId: string, path: string) {
+  await creditTranscript($, agentId, path)
+  await saveLedger($, true)
 }
 
 async function refresh($: EngineInterface) {
@@ -718,8 +913,12 @@ export const register: Register = on => {
   let tick: { cancel: () => void } | undefined
   let pricing: { cancel: () => void } | undefined
   let isLoading = false
+  // Work that a stop event scheduled (see classic.Stop): cancelled when the session ends.
+  const jobs = new Set<{ cancel: () => void }>()
 
   on('session.start', async ($, e, next) => {
+    // a new session may save its ledger again
+    endedId = undefined
     await restoreLedger($)
     // A reload keeps the roster: read the transcripts of subagents that finished
     // while no tokens were being counted for them.
@@ -758,6 +957,15 @@ export const register: Register = on => {
     pricing = undefined
     backfill?.cancel()
     backfill = undefined
+    for (const job of jobs) job.cancel()
+    jobs.clear()
+    attempts.clear()
+    // no save may write the key again once it is deleted (until a session.start)
+    try {
+      endedId = String(await $.session.id())
+    } catch {
+      endedId = '*'
+    }
     try {
       await reset($)
     } catch {
@@ -765,7 +973,7 @@ export const register: Register = on => {
     }
     try {
       // the session is over: its saved totals go with it
-      await $.store.delete(`${SAVED}${await $.session.id()}`)
+      await $.store.delete(`${SAVED}${endedId}`)
       savedJson = ''
     } catch {
       // the saved copy stays; a new session has an id of its own
@@ -798,7 +1006,7 @@ export const register: Register = on => {
     const before = await read($, run)
     const isSameWork = before.isActive && startedAt - before.now < 10_000
     if (!isSameWork) {
-      const history = ((await $.store.get('history')) ?? []) as Turn[]
+      const history = cleanHistory(await $.store.get('history'))
       const expectedTools = median(history.map(h => h.tools), 8)
       const expectedSeconds = median(history.map(h => h.seconds), 60)
       await update($, todos, list => list.filter(t => t.status !== 'completed'))
@@ -850,15 +1058,32 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // A subagent has stopped: read its own transcript for what it spent.
+  // The file work runs from a timer, so the stop is answered at once.
   on('classic.SubagentStop', async ($, e, next) => {
-    await creditTranscript($, e.agent_id, e.agent_transcript_path)
-    await saveLedger($, true)
+    const id: unknown = e.agent_id
+    const path: unknown = e.agent_transcript_path
+    if (isSafeId(id) && typeof path === 'string') {
+      const job = $.clock.after(0, () => {
+        jobs.delete(job)
+        void creditAndSave($, id, path).catch(() => {})
+      })
+      jobs.add(job)
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // The end of a main turn: the session transcript's path is known here.
+  // The end of a main turn: the session transcript's path is known here. Its
+  // subagents are read from a timer, so the end of the turn is not held up.
   on('classic.Stop', async ($, e, next) => {
-    await backfillSeats($, e.transcript_path.replace(/\.jsonl$/, ''))
+    const file: unknown = e.transcript_path
+    if (typeof file === 'string' && file.endsWith('.jsonl')) {
+      const base = file.slice(0, -'.jsonl'.length)
+      const job = $.clock.after(0, () => {
+        jobs.delete(job)
+        void backfillSeats($, base).catch(() => {})
+      })
+      jobs.add(job)
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -919,7 +1144,7 @@ export const register: Register = on => {
         subSteps: d.subSteps + (e.agentId === undefined ? 0 : 1),
       }))
     } catch (err) {
-      await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
+      await noteError($, '', err)
     }
     return response
   })
@@ -971,7 +1196,7 @@ export const register: Register = on => {
       await reconcile($, e.turnId, e.agentId ?? MAIN, e.usage)
       await update($, diag, d => ({ ...d, completes: d.completes + 1 }))
     } catch (err) {
-      await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
+      await noteError($, '', err)
     }
     await saveLedger($, true)
     // Only the main loop's end ends the run; a subagent's turn also ends here.
@@ -982,7 +1207,7 @@ export const register: Register = on => {
       const ended = await read($, run)
       const seconds = Math.round((ended.now - ended.startedAt) / 1000)
       if (ended.tools > 0 && ended.isActive) {
-        const history = ((await $.store.get('history')) ?? []) as Turn[]
+        const history = cleanHistory(await $.store.get('history'))
         await $.store.set('history', [...history, { tools: ended.tools, seconds }].slice(-20))
       }
       await update($, run, r => ({ ...r, isActive: false }))

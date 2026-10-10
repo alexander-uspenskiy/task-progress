@@ -72,8 +72,10 @@ test('a subagent whose requests never reached the hooks is counted from its own 
       agent_transcript_path: '/x/subagents/agent-h1000000aaaa.jsonl',
     } as never)
   await stop()
+  await clock.settle()
   // a second stop (or a repeat) adds nothing: only what is missing is counted
   await stop()
+  await clock.settle()
 
   const ui = await $.ui.mount(PANE as never)
   // full input 100 + 1000 + 10 + 2000 = 3110, output 50 + 40 = 90 -> 3.2k, message `a` once
@@ -100,6 +102,7 @@ test('a transcript that cannot be read leaves the figures alone and says why', a
     stop_hook_active: false,
     agent_transcript_path: '/missing',
   } as never)
+  await clock.settle()
   const ui = await $.ui.mount(PANE as never)
   expect(await text(ui, /Explore · 0 tok/)).toBeDefined()
   expect(await text(ui, /error: transcript:/)).toBeDefined()
@@ -169,8 +172,10 @@ test('at the end of a turn a finished subagent with no tokens is read from the s
 
   const stop = () => $.classic.Stop({ stop_hook_active: false, transcript_path: '/p/sess.jsonl' } as never)
   await stop()
+  await clock.settle()
   // tried once: a second turn end does not read it again
   await stop()
+  await clock.settle()
   expect(reads).toEqual(['/p/sess/subagents/agent-h3000000aaaa.jsonl'])
 
   const ui = await $.ui.mount(PANE as never)
