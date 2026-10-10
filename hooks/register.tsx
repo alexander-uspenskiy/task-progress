@@ -5,18 +5,17 @@ import type {
   AgentRow,
   Call,
   Counts,
+  Ledger,
   PriceRow,
   Prices,
   Run,
   Seat,
   Seen,
-  Setup,
   Tok,
   Todo,
+  Turn,
   Usage,
 } from '../types'
-
-type Turn = { tools: number; seconds: number }
 
 const PANE = 'task-agents'
 const MAIN = 'main'
@@ -43,18 +42,22 @@ const TASK_HINT =
 
 const todos = atom({ plugin: 'task-progress', key: 'todos' } as const, [])
 const calls = atom({ plugin: 'task-progress', key: 'calls' } as const, [])
-// Per agent, for the whole session; the session total is their sum. (The key
-// is versioned so figures kept by earlier builds are not carried over.)
-const usage = atom({ plugin: 'task-progress', key: 'usage4' } as const, [])
 const NONE: Tok = { input: 0, output: 0, cached: 0, written: 0, cost: 0, unpriced: 0 }
-// Everything since the last prompt, all agents.
-const turn = atom({ plugin: 'task-progress', key: 'turn4' } as const, NONE)
-// What each turn's own requests have already added, so a turn's closing
-// report only adds what they missed.
+// All token figures in ONE atom, written by one update per model request, so
+// the parts can never disagree (the key is versioned so figures kept by
+// earlier builds are not carried over):
+//   turn    everything since the last prompt, all agents
+//   agents  per agent, for the whole session; the session total is their sum
+//   seen    what each turn's own requests have already added, so a turn's
+//           closing report only adds what they missed
+const ledger = atom({ plugin: 'task-progress', key: 'ledger1' } as const, {
+  turn: NONE,
+  agents: [],
+  seen: [],
+})
 // List prices, fetched from Anthropic's pricing page and refreshed daily. Absent
 // until a fetch has worked: with no price for a model no cost is shown for it.
 const prices = atom({ plugin: 'task-progress', key: 'prices1' } as const, null)
-const seen = atom({ plugin: 'task-progress', key: 'seen2' } as const, [])
 const diag = atom({ plugin: 'task-progress', key: 'diag' } as const, {
   steps: 0,
   withUsage: 0,
@@ -149,6 +152,49 @@ const sumUsage = (list: Usage[]): Tok => ({
   cost: list.reduce((n, x) => n + x.cost, 0),
   unpriced: list.reduce((n, x) => n + x.unpriced, 0),
 })
+const addTok = (t: Tok, b: Tok): Tok => ({
+  input: t.input + b.input,
+  output: t.output + b.output,
+  cached: t.cached + b.cached,
+  written: t.written + b.written,
+  cost: t.cost + b.cost,
+  unpriced: t.unpriced + b.unpriced,
+})
+// Other agents kept in the per-agent lists (the main agent is always kept).
+const KEEP_AGENTS = 40
+const KEEP_SEEN = 50
+// Oldest first out: the lists put the newest entry last.
+const prune = <T extends { agentId: string }>(list: T[]): T[] => {
+  const others = list.filter(x => x.agentId !== MAIN)
+  if (others.length <= KEEP_AGENTS) return list
+  const gone = new Set(others.slice(0, others.length - KEEP_AGENTS))
+  return list.filter(x => !gone.has(x))
+}
+// One request's tokens, added to the turn and the agent (and to what the
+// turn's own requests have counted, when they say which turn they are).
+const tally = (l: Ledger, agentId: string, b: Tok, turnId?: string): Ledger => {
+  const prev = l.agents.find(x => x.agentId === agentId)
+  const sum: Usage = { agentId, ...addTok(prev ?? NONE, b) }
+  const had = turnId === undefined ? undefined : l.seen.find(x => x.turnId === turnId)
+  const seen: Seen[] =
+    turnId === undefined
+      ? l.seen
+      : [
+          ...l.seen.filter(x => x.turnId !== turnId),
+          {
+            turnId,
+            input: (had?.input ?? 0) + b.input,
+            output: (had?.output ?? 0) + b.output,
+            cached: (had?.cached ?? 0) + b.cached,
+            written: (had?.written ?? 0) + b.written,
+          },
+        ].slice(-KEEP_SEEN)
+  return {
+    turn: addTok(l.turn, b),
+    agents: prune([...l.agents.filter(x => x.agentId !== agentId), sum]),
+    seen,
+  }
+}
 const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
 
 // Secrets are cut out of a hint BEFORE it is shortened, because the hint is
@@ -331,6 +377,8 @@ function parsePrices(md: string): PriceRow[] {
 
 // What these tokens cost at the model's list price; undefined when the model
 // has no price, so the caller can leave it out.
+// All cache writes are priced at the 5-minute rate: the engine's ModelUsage reports one
+// cache_creation_input_tokens count per request, with no 5m/1h split.
 function costOf(list: Prices | null, model: string, c: Counts): number | undefined {
   if (list === null) return undefined
   const id = model.toLowerCase().replace(/\[.*\]$/, '').replace(/-\d{8}$/, '')
@@ -385,23 +433,53 @@ async function loadPrices($: EngineInterface) {
   }
 }
 
-async function count($: EngineInterface, agentId: string, c: Counts, model: string) {
+// The one write of a model request's tokens (see `ledger`). With a turnId the
+// turn's own bookkeeping is updated in the same write.
+async function count($: EngineInterface, agentId: string, c: Counts, model: string, turnId?: string) {
   const cost = costOf(await read($, prices), model, c)
   const bump: Tok = { ...c, cost: cost ?? 0, unpriced: cost === undefined ? 1 : 0 }
-  const add = (t: Tok): Tok => ({
-    input: t.input + bump.input,
-    output: t.output + bump.output,
-    cached: t.cached + bump.cached,
-    written: t.written + bump.written,
-    cost: t.cost + bump.cost,
-    unpriced: t.unpriced + bump.unpriced,
+  await update($, ledger, l => tally(l, agentId, bump, turnId))
+}
+
+// A turn's closing report is the authority on what it cost: add what its own
+// requests did not count, and forget the turn's bookkeeping, in one write. With
+// no report (an aborted turn) there is nothing to add, but the entry still goes.
+async function reconcile($: EngineInterface, turnId: string, agentId: string, u: (Parameters<typeof bumpOf>[0] & { model: string }) | undefined) {
+  const list = u === undefined ? null : await read($, prices)
+  await update($, ledger, l => {
+    const rest: Ledger = { ...l, seen: l.seen.filter(x => x.turnId !== turnId) }
+    if (u === undefined) return rest
+    const had = l.seen.find(x => x.turnId === turnId)
+    const full = bumpOf(u)
+    const missing: Counts = {
+      input: Math.max(0, full.input - (had?.input ?? 0)),
+      output: Math.max(0, full.output - (had?.output ?? 0)),
+      cached: Math.max(0, full.cached - (had?.cached ?? 0)),
+      written: Math.max(0, full.written - (had?.written ?? 0)),
+    }
+    if (missing.input + missing.output + missing.cached + missing.written === 0) return rest
+    const cost = costOf(list, u.model, missing)
+    return tally(rest, agentId, { ...missing, cost: cost ?? 0, unpriced: cost === undefined ? 1 : 0 })
   })
-  await update($, turn, add)
-  await update($, usage, list => {
-    const prev = list.find(x => x.agentId === agentId)
-    const sum: Usage = { agentId, ...add(prev ?? { ...NONE }) }
-    return [...list.filter(x => x.agentId !== agentId), sum]
-  })
+}
+
+// Back to the start of a session (not the prices: they are the same in the next one).
+async function reset($: EngineInterface) {
+  await update($, todos, () => [])
+  await update($, calls, () => [])
+  await update($, ledger, () => ({ turn: NONE, agents: [], seen: [] }))
+  await update($, roster, () => [])
+  await update($, setups, () => [])
+  await update($, agents, () => [])
+  await update($, run, () => ({
+    startedAt: 0,
+    now: 0,
+    isActive: false,
+    tools: 0,
+    expectedTools: 8,
+    expectedSeconds: 60,
+  }))
+  await update($, diag, () => ({ steps: 0, withUsage: 0, completes: 0, error: '' }))
 }
 
 async function refresh($: EngineInterface) {
@@ -472,6 +550,17 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // After a /clear the engine fires session.end (reason 'clear') and no
+  // session.start, so this is what clears the old figures.
+  on('session.end', async ($, e, next) => {
+    try {
+      await reset($)
+    } catch {
+      // a failed reset must not hold up the session's end
+    }
+    return next(e)
+  })
+
   on('command.run', { command: 'task-agents' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Agents' })
     return { text: 'Agents pane opened.' }
@@ -494,7 +583,7 @@ export const register: Register = on => {
     const expectedSeconds = median(history.map(h => h.seconds), 60)
     await update($, todos, list => list.filter(t => t.status !== 'completed'))
     await update($, calls, list => list.filter(c => c.agentId !== MAIN))
-    await update($, turn, () => NONE)
+    await update($, ledger, l => ({ ...l, turn: NONE }))
     await update($, run, () => ({
       startedAt,
       now: startedAt,
@@ -566,10 +655,9 @@ export const register: Register = on => {
       const known = await read($, setups)
       const now = known.find(x => x.agentId === agentId)
       if (now === undefined || now.model !== e.model || now.effort !== effort) {
-        await update($, setups, list => [
-          ...list.filter(x => x.agentId !== agentId),
-          { agentId, model: e.model, effort },
-        ])
+        await update($, setups, list =>
+          prune([...list.filter(x => x.agentId !== agentId), { agentId, model: e.model, effort }]),
+        )
       }
     } catch {
       // a failed note must not fail the model request
@@ -577,28 +665,14 @@ export const register: Register = on => {
     const response = yield* next(e)
     try {
       const u = response.usage
+      if (u !== null && u !== undefined) {
+        await count($, e.agentId ?? MAIN, bumpOf(u), u.model, e.turnId)
+      }
       await update($, diag, d => ({
         ...d,
         steps: d.steps + 1,
         withUsage: d.withUsage + (u === null || u === undefined ? 0 : 1),
       }))
-      if (u !== null && u !== undefined) {
-        const agentId = e.agentId ?? MAIN
-        const turnId = e.turnId
-        const bump = bumpOf(u)
-        await update($, seen, list => {
-          const prev = list.find(x => x.turnId === turnId)
-          const sum: Seen = {
-            turnId,
-            input: (prev?.input ?? 0) + bump.input,
-            output: (prev?.output ?? 0) + bump.output,
-            cached: (prev?.cached ?? 0) + bump.cached,
-            written: (prev?.written ?? 0) + bump.written,
-          }
-          return [...list.filter(x => x.turnId !== turnId), sum].slice(-50)
-        })
-        await count($, agentId, bump, u.model)
-      }
     } catch (err) {
       await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
     }
@@ -649,21 +723,7 @@ export const register: Register = on => {
     // The turn's closing report is the authority on what it cost: add whatever
     // its own requests did not already count.
     try {
-      const u = e.usage
-      if (u !== undefined) {
-        const had = (await read($, seen)).find(x => x.turnId === e.turnId)
-        const full = bumpOf(u)
-        const missing: Counts = {
-          input: Math.max(0, full.input - (had?.input ?? 0)),
-          output: Math.max(0, full.output - (had?.output ?? 0)),
-          cached: Math.max(0, full.cached - (had?.cached ?? 0)),
-          written: Math.max(0, full.written - (had?.written ?? 0)),
-        }
-        if (missing.input + missing.output + missing.cached + missing.written > 0) {
-          await count($, e.agentId ?? MAIN, missing, u.model)
-        }
-        await update($, seen, list => list.filter(x => x.turnId !== e.turnId))
-      }
+      await reconcile($, e.turnId, e.agentId ?? MAIN, e.usage)
       await update($, diag, d => ({ ...d, completes: d.completes + 1 }))
     } catch (err) {
       await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
@@ -721,8 +781,8 @@ export const register: Register = on => {
       if (i < SEGMENTS - 1) bar.push(<Text key={`g${i}`}>{' '}</Text>)
     }
     const percent = `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
-    const thisTurn = await read($, turn)
-    const session = sumUsage(await read($, usage))
+    const { turn: thisTurn, agents: perAgent } = await read($, ledger)
+    const session = sumUsage(perAgent)
     const hasTokens = fullInput(session) + session.output > 0
 
     return (
@@ -754,9 +814,8 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const seats = await read($, roster)
     const log = await read($, calls)
-    const spent = await read($, usage)
+    const { turn: thisTurn, agents: spent } = await read($, ledger)
     const configs = await read($, setups)
-    const thisTurn = await read($, turn)
     const dg = await read($, diag)
     const known = await read($, prices)
     const session = sumUsage(spent)

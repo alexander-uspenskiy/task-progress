@@ -37,7 +37,14 @@ export type PriceRow = {
 export type Prices = { fetchedAt: number; rows: PriceRow[] }
 export type Seen = { turnId: string } & Counts
 export type Diag = { steps: number; withUsage: number; completes: number; error: string }
-export type Usage = { agentId: string; input: number; output: number; cached: number }
+// One agent's tokens for the whole session.
+export type Usage = { agentId: string } & Tok
+// Every token figure, kept in ONE atom and written by one update per model request so the
+// parts cannot disagree. turn: everything since the last prompt, all agents; agents: per
+// agent (the session total is their sum); seen: what each turn's own requests have counted.
+export type Ledger = { turn: Tok; agents: Usage[]; seen: Seen[] }
+// One finished turn of the main loop, kept in the store (not an atom) to size the estimate.
+export type Turn = { tools: number; seconds: number }
 export type Run = {
   startedAt: number
   now: number
@@ -54,12 +61,10 @@ declare module 'claude-code' {
       agents: AgentRow[]
       run: Run
       calls: Call[]
-      usage4: Usage[]
+      ledger1: Ledger
       setups: Setup[]
       roster1: Seat[]
-      turn4: Tok
       prices1: Prices | null
-      seen2: Seen[]
       diag: Diag
     }
   }
