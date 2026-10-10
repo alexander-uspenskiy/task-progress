@@ -151,13 +151,50 @@ const sumUsage = (list: Usage[]): Tok => ({
 })
 const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
 
+// Secrets are cut out of a hint BEFORE it is shortened, because the hint is
+// shown on screen and kept in state. Every pattern is linear-time: no nested
+// quantifiers, and the open-ended ones are bounded.
+const SENSITIVE = /token|secret|passw(?:or)?d|pwd|api[-_]?key|auth|credential/i
+const SECRET_SHAPES =
+  /\bsk-ant-[\w-]+|\bsk-[\w-]{8,}|\bgh[pos]_\w+|\bgithub_pat_\w+|\bxox[abprs]-[\w-]+|\bAKIA[0-9A-Z]{16}/g
+const VALUE = `"[^"]{0,200}"|'[^']{0,200}'|[^\\s"'&;|]+`
+const KEY_VALUE = new RegExp(`([\\w.-]{1,64})(["']?\\s*[=:]\\s*)(${VALUE})`, 'g')
+const FLAG_VALUE = new RegExp(`(--?[\\w.-]{1,64})(\\s+)("[^"]{0,200}"|'[^']{0,200}'|[^\\s"'&;|-][^\\s"'&;|]*)`, 'g')
+const redact = (text: string) =>
+  text
+    // https://user:pass@host/p?a=b#c -> https://…@host/p?…  (one pass over each URL)
+    .replace(/[a-z][a-z0-9+.-]{0,20}:\/\/[^\s"']*/gi, url => {
+      const start = url.indexOf('://') + 3
+      let end = start
+      while (end < url.length && url[end] !== '/' && url[end] !== '?' && url[end] !== '#') end++
+      const at = url.lastIndexOf('@', end - 1)
+      const host = at >= start ? `…@${url.slice(at + 1, end)}` : url.slice(start, end)
+      const rest = url.slice(end)
+      const cut = rest.search(/[?#]/)
+      return `${url.slice(0, start)}${host}${cut < 0 ? rest : `${rest.slice(0, cut)}?…`}`
+    })
+    // Authorization: Bearer x, and a bare Bearer x
+    .replace(/(authorization["']?\s*[=:]\s*)(?:(?:bearer|basic|token|digest)\s+)?[^\s"']+/gi, '$1…')
+    .replace(/\bbearer\s+[^\s"']+/gi, 'Bearer …')
+    // well-known token shapes, and long hex / base64 runs
+    .replace(SECRET_SHAPES, '…')
+    .replace(/[A-Za-z0-9+/]{32,}/g, run =>
+      /\d/.test(run) && /[A-Za-z]/.test(run) && (!run.includes('/') || (/[a-z]/.test(run) && /[A-Z]/.test(run)))
+        ? '…'
+        : run,
+    )
+    // key=value, key: value and NAME=value cmd (also `export NAME=value`)
+    .replace(KEY_VALUE, (m, key: string, sep: string) => (SENSITIVE.test(key) ? `${key}${sep}…` : m))
+    // --flag value
+    .replace(FLAG_VALUE, (m, flag: string, space: string) => (SENSITIVE.test(flag) ? `${flag}${space}…` : m))
+
 // The most telling argument of a tool call, as one short string for the pane.
 const hintOf = (input: object) => {
   const o = input as Record<string, unknown>
   for (const key of ['file_path', 'path', 'pattern', 'command', 'query', 'url', 'description']) {
     const v = o[key]
     if (typeof v === 'string' && v !== '') {
-      const one = v.replace(/\s+/g, ' ').trim()
+      const one = redact(v.replace(/\s+/g, ' ').trim())
       return one.length > 36 ? `${one.slice(0, 35)}…` : one
     }
   }

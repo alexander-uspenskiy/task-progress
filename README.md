@@ -68,3 +68,10 @@ History · 3 of 8 finished · 305.1k tok · est. $0.12
 python3 scripts/check-usage.py                # newest session of the current project
 python3 scripts/check-usage.py --subagents    # also add subagent transcripts
 ```
+
+## Privacy and safety
+
+- **On screen:** tool names and a short hint of each call, with secrets such as tokens, passwords, bearer headers and URL credentials redacted before it is shortened.
+- **Stored** in the plugin store: `history` (tool counts and durations), `prices` and `pricesTriedAt`. No prompts and no tool arguments are persisted.
+- **Network:** one GET a day to Anthropic's public pricing page with a static user-agent. It carries no user data, and nothing else is sent anywhere.
+- **Read-only:** the mod only observes. It never denies, rewrites or re-runs tool calls.
