@@ -165,9 +165,29 @@ const fullInput = (t: Tok) => t.input + t.cached + t.written
 // 12 cents -> $0.12; the `+` says some requests had no price and are left out.
 const money = (n: number) =>
   n < 0.01 ? '<$0.01' : n < 100 ? `$${n.toFixed(2)}` : `$${Math.round(n)}`
-const tokText = (t: Tok) =>
-  `${tokens(fullInput(t))} in${t.cached > 0 ? ` (${tokens(t.cached)} cached)` : ''} · ${tokens(t.output)} out` +
-  (t.cost > 0 ? ` · est. ${money(t.cost)}${t.unpriced > 0 ? '+' : ''}` : '')
+const tokBase = (t: Tok) =>
+  `${tokens(fullInput(t))} in${t.cached > 0 ? ` (${tokens(t.cached)} cached)` : ''} · ${tokens(t.output)} out`
+const estText = (t: Tok) => `est. ${money(t.cost)}${t.unpriced > 0 ? '+' : ''}`
+
+// Parts of a line that should stand out. The estimated cost is bold, and the
+// model and effort get a colour of their own (a theme key, so it follows the
+// theme). `dimColor={false}` keeps them from fading with a dim line around them.
+// `Text` is the element the render hook resolved for its surface.
+const SETUP_COLOR = 'suggestion'
+// 299.7k in (299.6k cached) · 1.1k out · est. $0.42
+const tokKids = (Text: any, t: Tok): unknown[] => [
+  tokBase(t),
+  ...(t.cost > 0
+    ? [' · ', <Text key="est" bold dimColor={false}>{estText(t)}</Text>]
+    : []),
+]
+// sonnet-5-5 · effort high
+const setupKids = (Text: any, model: string, effort: string): unknown[] => [
+  <Text key="model" color={SETUP_COLOR} dimColor={false}>{shortModel(model)}</Text>,
+  ...(effort === ''
+    ? []
+    : [' · ', <Text key="effort" color={SETUP_COLOR} dimColor={false}>{`effort ${effort}`}</Text>]),
+]
 
 // claude-haiku-5-5-20260101 -> haiku-5-5
 const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
@@ -600,7 +620,7 @@ export const register: Register = on => {
       </Box>
       {hasTokens && (
         <Text color={PALETTE.muted} wrap="truncate-end">
-          turn {tokText(thisTurn)} · session {tokText(session)}
+          turn {tokKids(Text, thisTurn)} · session {tokKids(Text, session)}
         </Text>
       )}
       </Box>
@@ -655,16 +675,15 @@ export const register: Register = on => {
         </Box>
       )
     }
-    const setupText = (id: string) => {
+    const setupKids2 = (id: string): unknown[] => {
       const setup = configs.find(x => x.agentId === id)
-      if (setup === undefined) return ''
-      return `${shortModel(setup.model)}${setup.effort === '' ? '' : ` · effort ${setup.effort}`}`
+      return setup === undefined ? [] : setupKids(Text, setup.model, setup.effort)
     }
-    const costText = (id: string) => {
+    const costKids = (id: string): unknown[] => {
       const cost = spent.find(x => x.agentId === id)
       return cost === undefined
-        ? 'no tokens yet'
-        : `${tokens(fullInput(cost) + cost.output)} tok · ${tokText(cost)}`
+        ? ['no tokens yet']
+        : [`${tokens(fullInput(cost) + cost.output)} tok · `, ...tokKids(Text, cost)]
     }
 
     // Main agent: a card of its own at the top.
@@ -681,8 +700,13 @@ export const register: Register = on => {
       4 + Math.min(mainCalls.length, mainShown) + (mainCalls.length > mainShown ? 1 : 0)
     const main = (
       <Box flexDirection="column">
-        {line('main', `▌ ${MAIN_ICON} Main agent`, setupText(MAIN) === '' ? '' : `  ${setupText(MAIN)}`, 'claude')}
-        <Text dimColor wrap="truncate-end">{'    '}{costText(MAIN)}</Text>
+        <Box>
+          <Box flexShrink={0}>
+            <Text bold color="claude">{`▌ ${MAIN_ICON} Main agent`}</Text>
+          </Box>
+          <Text dimColor wrap="truncate-end">{'  '}{setupKids2(MAIN)}</Text>
+        </Box>
+        <Text dimColor wrap="truncate-end">{'    '}{costKids(MAIN)}</Text>
         <Text dimColor wrap="truncate-end">
           {'    '}
           {mainCalls.length} tools{failed > 0 ? ` (${failed} failed)` : ''}
@@ -723,11 +747,12 @@ export const register: Register = on => {
           <Text dimColor wrap="truncate-end">
             {'    '}
             {a.id.slice(0, 8)} · {a.status}
-            {setupText(a.id) === '' ? '' : ` · ${setupText(a.id)}`}
+            {setupKids2(a.id).length === 0 ? '' : ' · '}
+            {setupKids2(a.id)}
           </Text>
           <Text dimColor wrap="truncate-end">
             {'    '}
-            {mine.length} tools · {costText(a.id)}
+            {mine.length} tools · {costKids(a.id)}
           </Text>
           {callLines(mine, SHOWN_CALLS)}
         </Box>,
@@ -738,9 +763,9 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Text bold>Tokens</Text>
         <Text dimColor wrap="truncate-end">{'  '}session (all agents)</Text>
-        <Text wrap="truncate-end">{'    '}{tokText(session)}</Text>
+        <Text wrap="truncate-end">{'    '}{tokKids(Text, session)}</Text>
         <Text dimColor wrap="truncate-end">{'  '}this turn</Text>
-        <Text wrap="truncate-end">{'    '}{tokText(thisTurn)}</Text>
+        <Text wrap="truncate-end">{'    '}{tokKids(Text, thisTurn)}</Text>
         <Text> </Text>
         {main}
         <Text> </Text>
@@ -760,7 +785,8 @@ export const register: Register = on => {
             <Text> </Text>
             <Text bold wrap="truncate-end">
               History · {shownEnded} of {ended.length} finished · {tokens(fullInput(everyone) + everyone.output)} tok
-              {everyone.cost > 0 ? ` · est. ${money(everyone.cost)}${everyone.unpriced > 0 ? '+' : ''}` : ''}
+              {everyone.cost > 0 ? ' · ' : ''}
+              {everyone.cost > 0 ? <Text bold>{estText(everyone)}</Text> : ''}
             </Text>
             {ended.slice(0, shownEnded).map(s => {
               const spentBy = spent.find(x => x.agentId === s.id)
@@ -772,7 +798,13 @@ export const register: Register = on => {
                   </Box>
                   <Text dimColor wrap="truncate-end">
                     {s.name !== '' ? s.name : s.type} · {tokens(spentBy === undefined ? 0 : fullInput(spentBy) + spentBy.output)} tok
-                    {spentBy !== undefined && spentBy.cost > 0 ? ` · est. ${money(spentBy.cost)}${spentBy.unpriced > 0 ? '+' : ''}` : ''} ·{' '}
+                    {spentBy !== undefined && spentBy.cost > 0 ? ' · ' : ''}
+                    {spentBy !== undefined && spentBy.cost > 0 ? (
+                      <Text bold dimColor={false}>{estText(spentBy)}</Text>
+                    ) : (
+                      ''
+                    )}{' '}
+                    ·{' '}
                     {log.filter(c => c.agentId === s.id).length} tools · {span(s.endedAt - s.firstSeen)}
                     {what}
                   </Text>

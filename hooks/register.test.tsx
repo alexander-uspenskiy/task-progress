@@ -176,6 +176,11 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   expect(await pane.find({ type: 'Text', text: /haiku-5-5 · effort high/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /TodoWrite/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /opus-5-5 · effort xhigh/ })).toBeDefined()
+  // model and effort have a colour of their own, apart from the dim line around them
+  for (const text of [/^opus-5-5$/, /^effort xhigh$/, /^haiku-5-5$/, /^effort high$/]) {
+    const piece = await pane.find({ type: 'Text', text })
+    expect(piece?.props?.color).toBe('suggestion')
+  }
   expect(await pane.find({ type: 'Text', text: /1 tools · 1\.5k tok · 1\.2k in · 300 out$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /9\.7k tok · 9\.0k in \(4\.0k cached\) · 700 out/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /2 tools · Bash×2/ })).toBeDefined()
@@ -301,6 +306,9 @@ test('with a price it shows an estimated cost, dated model ids and tiers include
   const pane = await $.ui.mount(PANE as never)
   expect(await pane.find({ type: 'Text', text: /^\s*103\.0k in \(100\.0k cached\) · 500 out · est\. \$0\.04$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /6 prices/ })).toBeDefined()
+  // the estimated amount stands out in bold, wherever it is shown
+  const est = await pane.find({ type: 'Text', text: /^est\. \$0\.04$/ })
+  expect(est?.props?.bold).toBe(true)
   await pane.unmount()
 })
 
