@@ -103,6 +103,8 @@ const FINISHED = ['completed', 'failed', 'killed']
 // lowercased "<type> <name>" wins; edit or extend the list to taste. Single
 // code point emoji only: they keep their width in every terminal font.
 const ICON_RULES: [RegExp, string][] = [
+  [/coordinat/, '🧭'], // coordinator
+  [/orchestrat/, '🎼'], // orchestrator
   [/explor|search|find/, '🔍'], // searches the code
   [/plan|architect/, '🔬'], // architect
   [/design/, '📐'],

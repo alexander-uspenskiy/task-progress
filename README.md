@@ -32,6 +32,8 @@ Each card in the Agents pane shows a small emoji after its status icon, picked f
 
 | Agent looks like | Icon | Meaning |
 |---|---|---|
+| coordinat | 🧭 | coordinator |
+| orchestrat | 🎼 | orchestrator |
 | explore, search, find | 🔍 | searches the code |
 | plan, architect | 🔬 | architect / science |
 | design | 📐 | designer |
