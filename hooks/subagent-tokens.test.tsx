@@ -49,6 +49,7 @@ const harness = (on: any, opts: { store?: Record<string, unknown>; memory?: Map<
   on('turn.complete', (_$: any, e: any) => ({ text: e.answer }))
   on('classic.SubagentStop', () => ({}))
   on('classic.Stop', () => ({}))
+  on('agent.spawn', () => ({ model: 'claude-haiku-5-5-20260101', agentId: 'h4000000aaaa' }))
   on('fs.read', (_$: any, e: any) => (reads.push(e.path), opts.transcript === null ? { deny: 'no such file' } : { value: opts.transcript ?? TRANSCRIPT }))
   return clock
 }
@@ -79,7 +80,9 @@ test('a subagent whose requests never reached the hooks is counted from its own 
   expect(await text(ui, /^History · 1 of 1 finished · 3\.2k tok$/)).toBeDefined()
   // the largest output of message `a` counts (50, not 5): 50 + 40 = 90
   expect(await text(ui, /^\s*3\.1k in \(3\.0k cached\) · 90 out$/)).toBeDefined()
-  expect(await text(ui, /Explore · 3\.2k tok · 0 tools/)).toBeDefined()
+  // the model comes from the transcript; effort is not in it, so none is shown
+  expect(await text(ui, /Explore · unlisted-9 · 3\.2k tok · 0 tools/)).toBeDefined()
+  expect(await text(ui, /effort/)).toBeUndefined()
   expect(await text(ui, /1 subagent transcripts/)).toBeDefined()
   await ui.unmount()
 })
@@ -173,4 +176,78 @@ test('at the end of a turn a finished subagent with no tokens is read from the s
   const ui = await $.ui.mount(PANE as never)
   expect(await text(ui, /^History · 1 of 1 finished · 3\.2k tok$/)).toBeDefined()
   await ui.unmount()
+})
+
+test('the model a subagent was started on shows in the history, even before any request is seen', async ($, on) => {
+  const clock = harness(on, { transcript: null })
+  on('agent.list', () => ({
+    value: [{ id: 'h4000000aaaa', description: 'quick job', type: 'general-purpose', status: 'completed' }],
+  }))
+  await $.prompt.submit({ text: 'go' } as never)
+  await $.agent.spawn({ prompt: 'do it' } as never)
+  await clock.advance(500)
+
+  const ui = await $.ui.mount(PANE as never)
+  // the resolved model, dated id shortened; no effort is known for it
+  expect(await text(ui, /general-purpose · haiku-5-5 · 0 tok · 0 tools/)).toBeDefined()
+  const model = await ui.find({ type: 'Text', text: /^haiku-5-5$/ })
+  expect(model?.props?.color).toBe('suggestion')
+  await ui.unmount()
+})
+
+test('a finished subagent with no tokens is found and read on its own, with no stop event at all', async ($, on) => {
+  reads.length = 0
+  const clock = harness(on)
+  const expected = '/home/u/.claude/projects/-proj/s1/subagents/agent-h5000000aaaa.jsonl'
+  on('env.get', () => ({ value: '/home/u' }))
+  on('fs.list', () => ({ value: [{ name: 'other', kind: 'file', size: 1, mtimeMs: 0, isLink: false }, { name: '-proj', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
+  on('fs.exists', (_$: any, e: any) => ({ value: e.path === expected }))
+  on('agent.list', () => ({
+    value: [{ id: 'h5000000aaaa', description: 'earlier job', type: 'Explore', status: 'completed' }],
+  }))
+  await $.prompt.submit({ text: 'go' } as never)
+  await clock.advance(500)
+  await clock.settle()
+
+  expect(reads).toEqual([expected])
+  const ui = await $.ui.mount(PANE as never)
+  expect(await text(ui, /^History · 1 of 1 finished · 3\.2k tok$/)).toBeDefined()
+  await ui.unmount()
+})
+
+test('a message sent while a run is going continues the turn instead of restarting it', async ($, on) => {
+  const clock = harness(on)
+  on('agent.list', () => ({ value: [] }))
+  on('turn.step', async function* (_$: any, e: any) {
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      stopReason: 'end_turn',
+      usage: { model: 'm', input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }
+  })
+  on('tool.call', () => ({ result: { text: 'ok' } }))
+  await $.prompt.submit({ text: 'first' } as never)
+  for await (const _chunk of $.turn.step({ turnId: 't1', index: 0, model: 'm', messageCount: 1 } as never)) {
+    // drain
+  }
+  await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'c1' } as never)
+  await clock.advance(1000)
+
+  // the user sends another message while the run is still going
+  await $.prompt.submit({ text: 'mid-turn' } as never)
+  const during = await $.ui.mount(PANE as never)
+  expect(await text(during, /^\s*1\.0k in · 500 out$/)).toBeDefined()
+  expect(await text(during, /^\s*1 tools/)).toBeDefined()
+  await during.unmount()
+
+  // once the run has ended, the next prompt starts a new turn
+  await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' } as never)
+  await clock.advance(1000)
+  await $.prompt.submit({ text: 'after' } as never)
+  const fresh = await $.ui.mount(PANE as never)
+  expect(await text(fresh, /^\s*0 in · 0 out$/)).toBeDefined()
+  await fresh.unmount()
 })

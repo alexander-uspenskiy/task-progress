@@ -506,7 +506,10 @@ const SAVED = 'ledger:'
 const KEEP_SAVED = 8
 let savedJson = ''
 let savedAt = 0
-const tried = new Set<string>()
+// per subagent: how many times its transcript was tried, and when last
+const attempts = new Map<string, { n: number; at: number }>()
+const RETRY_MS = 5000
+const MAX_TRIES = 5
 async function saveLedger($: EngineInterface, force = false) {
   try {
     const now = await $.clock.now()
@@ -545,6 +548,21 @@ async function restoreLedger($: EngineInterface) {
   }
 }
 
+// Remember which model (and effort, when it is known) an agent runs on. Effort is
+// only reported with a model request, so an agent whose requests never reach the
+// hooks has a model (from its spawn or its transcript) and no effort.
+async function noteSetup($: EngineInterface, agentId: string, model: string, effort = '') {
+  if (model === '') return
+  await update($, setups, list => {
+    const had = list.find(x => x.agentId === agentId)
+    if (had !== undefined && had.model === model && (effort === '' || had.effort === effort)) return list
+    return prune([
+      ...list.filter(x => x.agentId !== agentId),
+      { agentId, model, effort: effort === '' ? had?.effort ?? '' : effort },
+    ])
+  })
+}
+
 // What a subagent's own transcript says it used (the API's usage, once per message).
 // The model requests of a subagent may not reach this plugin's hooks, so when it
 // stops, anything the live counting missed is added from here.
@@ -576,7 +594,9 @@ async function creditTranscript($: EngineInterface, agentId: string, path: strin
       byMessage.set(m.id, { model: String(m.model ?? seen?.model ?? ''), c })
     }
     let total: Tok = NONE
+    let lastModel = ''
     for (const { model, c } of byMessage.values()) {
+      if (model !== '') lastModel = model
       const cost = costOf(list, model, c)
       total = addTok(total, { ...c, cost: cost ?? 0, unpriced: cost === undefined ? 1 : 0 })
     }
@@ -600,8 +620,51 @@ async function creditTranscript($: EngineInterface, agentId: string, path: strin
       return tally(l, agentId, missing)
     })
     if (added) await update($, diag, d => ({ ...d, transcripts: d.transcripts + 1 }))
+    await noteSetup($, agentId, lastModel)
   } catch (err) {
     await update($, diag, d => ({ ...d, error: `transcript: ${String(err).slice(0, 100)}` }))
+  }
+}
+
+// Where a subagent's transcript is: <home>/.claude/projects/<project>/<session id>/
+// subagents/agent-<id>.jsonl. The project folder is named after the directory the
+// session started in, so each project folder is looked in for this session's id.
+async function findTranscript($: EngineInterface, agentId: string): Promise<string | undefined> {
+  const home = await $.env.get('HOME')
+  if (home === undefined || home === '') return undefined
+  const sid = await $.session.id()
+  const root = `${home}/.claude/projects`
+  for (const dir of await $.fs.list(root)) {
+    if (dir.kind !== 'dir') continue
+    const path = `${root}/${dir.name}/${sid}/subagents/agent-${agentId}.jsonl`
+    if (await $.fs.exists(path)) return path
+  }
+  return undefined
+}
+
+// A subagent that has finished with no tokens counted (its stop event never came,
+// the live requests never reached the hooks, or the plugin was reloaded since) is
+// read from its transcript. Each is tried a few times, spaced out, then left alone.
+// `base`: the session transcript's path without `.jsonl`, when it is known.
+async function backfillSeats($: EngineInterface, base?: string) {
+  try {
+    const seats = await read($, roster)
+    const l = norm(await read($, ledger))
+    for (const s of seats) {
+      if (s.endedAt === 0) continue
+      if ((l.agents.find(x => x.agentId === s.id)?.output ?? 0) > 0) continue
+      const now = await $.clock.now()
+      const tried = attempts.get(s.id)
+      // a transcript may not be written out yet: try again a few times, spaced out
+      // (a path handed over by the end of a turn is tried whenever it comes; only the
+      // search of the project folders is spaced out)
+      if (tried !== undefined && (tried.n >= MAX_TRIES || (base === undefined && now - tried.at < RETRY_MS))) continue
+      attempts.set(s.id, { n: (tried?.n ?? 0) + 1, at: now })
+      const path = base === undefined ? await findTranscript($, s.id) : `${base}/subagents/agent-${s.id}.jsonl`
+      if (path !== undefined) await creditTranscript($, s.id, path)
+    }
+  } catch {
+    // nothing to backfill
   }
 }
 
@@ -644,18 +707,26 @@ async function refresh($: EngineInterface) {
 // a subagent that has not finished.
 async function poll($: EngineInterface) {
   await refresh($)
+  await backfillSeats($)
   const r = await read($, run)
   const rows = await read($, agents)
   return r.isActive || rows.some(a => !FINISHED.includes(a.status))
 }
 
 export const register: Register = on => {
+  let backfill: { cancel: () => void } | undefined
   let tick: { cancel: () => void } | undefined
   let pricing: { cancel: () => void } | undefined
   let isLoading = false
 
   on('session.start', async ($, e, next) => {
     await restoreLedger($)
+    // A reload keeps the roster: read the transcripts of subagents that finished
+    // while no tokens were being counted for them.
+    backfill?.cancel()
+    backfill = $.clock.after(0, () => {
+      void backfillSeats($).catch(() => {})
+    })
     // The fetch runs from a timer, as a dispatch of its own: it can never hold
     // this hook up.
     pricing?.cancel()
@@ -685,6 +756,8 @@ export const register: Register = on => {
     tick = undefined
     pricing?.cancel()
     pricing = undefined
+    backfill?.cancel()
+    backfill = undefined
     try {
       await reset($)
     } catch {
@@ -717,37 +790,63 @@ export const register: Register = on => {
           isLoading = false
         })
     })
+    // A message sent while a run is still going (the tick moved the clock within the
+    // last few seconds) belongs to the same piece of work: the turn's totals, the
+    // main agent's tools and the run's clock carry on. Only a prompt after the run
+    // has ended, or a stale one that never reported its end, starts afresh.
     const startedAt = await $.clock.now()
-    const history = ((await $.store.get('history')) ?? []) as Turn[]
-    const expectedTools = median(history.map(h => h.tools), 8)
-    const expectedSeconds = median(history.map(h => h.seconds), 60)
-    await update($, todos, list => list.filter(t => t.status !== 'completed'))
-    await update($, calls, list => list.filter(c => c.agentId !== MAIN))
-    await update($, ledger, l => ({ ...norm(l), turn: NONE }))
-    await update($, run, () => ({
-      startedAt,
-      now: startedAt,
-      isActive: true,
-      tools: 0,
-      expectedTools: Math.max(3, expectedTools),
-      expectedSeconds: Math.max(15, expectedSeconds),
-    }))
+    const before = await read($, run)
+    const isSameWork = before.isActive && startedAt - before.now < 10_000
+    if (!isSameWork) {
+      const history = ((await $.store.get('history')) ?? []) as Turn[]
+      const expectedTools = median(history.map(h => h.tools), 8)
+      const expectedSeconds = median(history.map(h => h.seconds), 60)
+      await update($, todos, list => list.filter(t => t.status !== 'completed'))
+      await update($, calls, list => list.filter(c => c.agentId !== MAIN))
+      await update($, ledger, l => ({ ...norm(l), turn: NONE }))
+      await update($, run, () => ({
+        startedAt,
+        now: startedAt,
+        isActive: true,
+        tools: 0,
+        expectedTools: Math.max(3, expectedTools),
+        expectedSeconds: Math.max(15, expectedSeconds),
+      }))
+    }
     void $.ui.open({ id: PANE, title: 'Agents' })
-    tick?.cancel()
-    // It stops itself once nothing is going on, so a turn that never reports
-    // its end cannot leave it polling; the next prompt starts it again.
-    const mine = $.clock.every(TICK_MS, () => {
-      void poll($)
-        .then(isBusy => {
-          if (isBusy) return
-          mine.cancel()
-          if (tick === mine) tick = undefined
-        })
-        .catch(() => {})
+    // Finished subagents with no tokens counted are read from their transcripts.
+    backfill?.cancel()
+    backfill = $.clock.after(0, () => {
+      void backfillSeats($).catch(() => {})
     })
-    tick = mine
+    if (!isSameWork || tick === undefined) {
+      tick?.cancel()
+      // It stops itself once nothing is going on, so a turn that never reports
+      // its end cannot leave it polling; the next prompt starts it again.
+      const mine = $.clock.every(TICK_MS, () => {
+        void poll($)
+          .then(isBusy => {
+            if (isBusy) return
+            mine.cancel()
+            if (tick === mine) tick = undefined
+          })
+          .catch(() => {})
+      })
+      tick = mine
+    }
 
     return next({ ...e, context: [...(e.context ?? []), TASK_HINT] })
+  }).catch(($, e, next) => next(e))
+
+  // A subagent has been started: its resolved model is known from here on.
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    try {
+      if (started.deny === undefined) await noteSetup($, started.agentId, started.model)
+    } catch {
+      // the model just stays unknown
+    }
+    return started
   }).catch(($, e, next) => next(e))
 
   // A subagent has stopped: read its own transcript for what it spent.
@@ -757,23 +856,9 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // The end of a main turn: a subagent that finished with no tokens counted (its
-  // stop event never came, or the plugin was reloaded since) is read from the
-  // `subagents/` folder next to the session's transcript. Each is tried once.
+  // The end of a main turn: the session transcript's path is known here.
   on('classic.Stop', async ($, e, next) => {
-    try {
-      const base = e.transcript_path.replace(/\.jsonl$/, '')
-      const seats = await read($, roster)
-      const l = norm(await read($, ledger))
-      for (const s of seats) {
-        if (s.endedAt === 0 || tried.has(s.id)) continue
-        if ((l.agents.find(x => x.agentId === s.id)?.output ?? 0) > 0) continue
-        tried.add(s.id)
-        await creditTranscript($, s.id, `${base}/subagents/agent-${s.id}.jsonl`)
-      }
-    } catch {
-      // nothing to backfill
-    }
+    await backfillSeats($, e.transcript_path.replace(/\.jsonl$/, ''))
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -1142,7 +1227,9 @@ export const register: Register = on => {
                     </Text>
                   </Box>
                   <Text dimColor wrap="truncate-end">
-                    {s.name !== '' ? s.name : s.type} · {tokens(spentBy === undefined ? 0 : fullInput(spentBy) + spentBy.output)} tok
+                    {s.name !== '' ? s.name : s.type}
+                    {setupKids2(s.id).length === 0 ? '' : ' · '}
+                    {setupKids2(s.id)} · {tokens(spentBy === undefined ? 0 : fullInput(spentBy) + spentBy.output)} tok
                     {spentBy !== undefined && spentBy.cost > 0 ? ' · ' : ''}
                     {spentBy !== undefined && spentBy.cost > 0 ? (
                       <Text bold dimColor={false}>{estText(spentBy)}</Text>

@@ -433,6 +433,7 @@ test('a finished subagent moves into the history with the tokens it spent', asyn
     turnId: 't1',
     index: 0,
     model: 'claude-unlisted-9',
+    effort: 'high',
     messageCount: 1,
     agentId: 'h1000000aaaa',
   } as never)) {
@@ -451,7 +452,11 @@ test('a finished subagent moves into the history with the tokens it spent', asyn
 
   const done = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 80 } } as never)
   expect(await done.find({ type: 'Text', text: /^History · 1 of 1 finished · 101\.5k tok$/ })).toBeDefined()
-  expect(await done.find({ type: 'Text', text: /Explore · 101\.5k tok · 0 tools · \d+s · find hooks/ })).toBeDefined()
+  expect(await done.find({ type: 'Text', text: /Explore · unlisted-9 · effort high · 101\.5k tok · 0 tools · \d+s · find hooks/ })).toBeDefined()
+  // model and effort of a finished agent, in their own colour
+  for (const text of [/^unlisted-9$/, /^effort high$/]) {
+    expect((await done.find({ type: 'Text', text }))?.props?.color).toBe('suggestion')
+  }
   expect(await done.find({ type: 'Text', text: /● 🔍/ })).toBeDefined()
   // a completed agent's marker is gray in the history, not green
   const marker = await done.find({ type: 'Text', text: /^● 🔍\s*$/ })
