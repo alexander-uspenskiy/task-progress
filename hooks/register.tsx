@@ -24,6 +24,13 @@ const SEGMENTS = 20
 const TICK_MS = 400
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
+// The price fetch never holds anything up for longer than this.
+const FETCH_TIMEOUT_MS = 8000
+// Limits on the pricing page, which is read as hostile input.
+const PAGE_MAX_CHARS = 400_000
+const LINE_MAX_CHARS = 2000
+const ROWS_MAX = 200
+const PRICE_MAX = 1000 // USD per million tokens
 // Anthropic's own pricing page, published as markdown.
 // The page answers 403 to some generic client names, so say who is asking.
 const USER_AGENT = 'task-progress-mod (Claude Code plugin)'
@@ -247,19 +254,27 @@ const bumpOf = (u: {
 })
 
 // The pricing page's model table: one row per model, a second row for a
-// model's long-prompt rates. Anything that does not parse is left out.
+// model's long-prompt rates. Anything that does not parse is left out. The page
+// is hostile input: only its first PAGE_MAX_CHARS are read, a line over
+// LINE_MAX_CHARS is skipped, at most ROWS_MAX rows are kept, and every pattern
+// below is linear (none can rescan the rest of the line from each character).
 function parsePrices(md: string): PriceRow[] {
   const rows: PriceRow[] = []
   const price = (cell: string | undefined) => {
     const m = /\$([\d.]+)/.exec(cell ?? '')
-    return m ? Number(m[1]) : NaN
+    const n = m ? Number(m[1]) : NaN
+    return Number.isFinite(n) && n >= 0 && n <= PRICE_MAX ? n : NaN
   }
-  for (const line of md.split('\n')) {
-    if (!line.startsWith('| Claude')) continue
+  for (const line of md.slice(0, PAGE_MAX_CHARS).split('\n')) {
+    if (rows.length >= ROWS_MAX) break
+    if (line.length > LINE_MAX_CHARS || !line.startsWith('| Claude')) continue
     const cells = line.split('|').slice(1, -1).map(c => c.trim())
     if (cells.length < 6) continue
-    const label = (cells[0] ?? '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    const name = label.replace(/\([^)]*\)/g, '').trim().toLowerCase().replace(/^claude\s+/, '')
+    // `[^\][]` and `[^()]` stop at the next bracket, so a run of "[" or "(" is
+    // scanned once, not once per bracket.
+    const label = (cells[0] ?? '').replace(/\[([^\][]*)\]\([^()]*\)/g, '$1')
+    const name = label.replace(/\([^()]*\)/g, '').trim().toLowerCase().replace(/^claude\s+/, '')
+    if (name === '' || name.length > 80) continue
     const over = /over ([\d,]+) tokens/.exec(label)
     const row: PriceRow = {
       id: `claude-${name.replace(/[\s.]+/g, '-')}`,
@@ -270,7 +285,9 @@ function parsePrices(md: string): PriceRow[] {
       output: price(cells[5]),
     }
     if ([row.input, row.write5m, row.write1h, row.cacheRead, row.output].some(n => !(n >= 0))) continue
-    rows.push(over ? { ...row, over: Number((over[1] ?? '0').replace(/,/g, '')) } : row)
+    const limit = over ? Number((over[1] ?? '0').replace(/,/g, '')) : undefined
+    if (limit !== undefined && !Number.isFinite(limit)) continue
+    rows.push(limit === undefined ? row : { ...row, over: limit })
   }
   return rows
 }
@@ -287,6 +304,24 @@ function costOf(list: Prices | null, model: string, c: Counts): number | undefin
   return (c.input * row.input + c.written * row.write5m + c.cached * row.cacheRead + c.output * row.output) / 1e6
 }
 
+// The pricing page, or undefined when it has not answered within
+// FETCH_TIMEOUT_MS (the request is then left to finish or fail on its own).
+async function fetchPage($: EngineInterface) {
+  const stop = new AbortController()
+  const fetching = $.http.fetch(PRICING_URL, {
+    headers: { 'user-agent': USER_AGENT, accept: 'text/markdown' },
+  })
+  fetching.catch(() => {})
+  const timeout = $.clock
+    .sleep(FETCH_TIMEOUT_MS, { signal: stop.signal })
+    .then(() => undefined, () => undefined)
+  try {
+    return await Promise.race([fetching, timeout])
+  } finally {
+    stop.abort()
+  }
+}
+
 // Load the saved prices, and fetch fresh ones when they are over a day old (a
 // failed fetch is not retried within the hour). Any failure leaves things as
 // they were: prices simply stay unknown, and no cost is shown.
@@ -301,10 +336,8 @@ async function loadPrices($: EngineInterface) {
     const isFresh = saved !== undefined && now - saved.fetchedAt < DAY
     if (isFresh || now - tried < HOUR) return
     await $.store.set('pricesTriedAt', now)
-    const res = await $.http.fetch(PRICING_URL, {
-      headers: { 'user-agent': USER_AGENT, accept: 'text/markdown' },
-    })
-    if (!res.ok) return
+    const res = await fetchPage($)
+    if (res === undefined || !res.ok) return
     const rows = parsePrices(res.text)
     if (rows.length < 5) return
     const next: Prices = { fetchedAt: now, rows }
@@ -368,11 +401,33 @@ async function refresh($: EngineInterface) {
   })
 }
 
+// One poll of the tick. True while something is still going: the run itself, or
+// a subagent that has not finished.
+async function poll($: EngineInterface) {
+  await refresh($)
+  const r = await read($, run)
+  const rows = await read($, agents)
+  return r.isActive || rows.some(a => !FINISHED.includes(a.status))
+}
+
 export const register: Register = on => {
   let tick: { cancel: () => void } | undefined
+  let pricing: { cancel: () => void } | undefined
+  let isLoading = false
 
   on('session.start', async ($, e, next) => {
-    await loadPrices($)
+    // The fetch runs from a timer, as a dispatch of its own: it can never hold
+    // this hook up.
+    pricing?.cancel()
+    pricing = $.clock.after(0, () => {
+      if (isLoading) return
+      isLoading = true
+      void loadPrices($)
+        .catch(() => {})
+        .then(() => {
+          isLoading = false
+        })
+    })
     await $.command.register({
       name: 'task-agents',
       description: 'Open the agents pane (status of every agent)',
@@ -386,7 +441,16 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    await loadPrices($)
+    pricing?.cancel()
+    pricing = $.clock.after(0, () => {
+      if (isLoading) return
+      isLoading = true
+      void loadPrices($)
+        .catch(() => {})
+        .then(() => {
+          isLoading = false
+        })
+    })
     const startedAt = await $.clock.now()
     const history = ((await $.store.get('history')) ?? []) as Turn[]
     const expectedTools = median(history.map(h => h.tools), 8)
@@ -404,9 +468,28 @@ export const register: Register = on => {
     }))
     void $.ui.open({ id: PANE, title: 'Agents' })
     tick?.cancel()
-    tick = $.clock.every(TICK_MS, () => void refresh($))
+    // It stops itself once nothing is going on, so a turn that never reports
+    // its end cannot leave it polling; the next prompt starts it again.
+    const mine = $.clock.every(TICK_MS, () => {
+      void poll($)
+        .then(isBusy => {
+          if (isBusy) return
+          mine.cancel()
+          if (tick === mine) tick = undefined
+        })
+        .catch(() => {})
+    })
+    tick = mine
 
     return next({ ...e, context: [...(e.context ?? []), TASK_HINT] })
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    tick?.cancel()
+    tick = undefined
+    pricing?.cancel()
+    pricing = undefined
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {

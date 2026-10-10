@@ -279,7 +279,7 @@ const spend = async ($: any, model: string) => {
 }
 
 const harness = (on: any, http: () => unknown, model: string) => {
-  mock.clock(on, { now: 1_800_000_000_000 })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
   mock.store(on)
   on('http.fetch', http)
   on('prompt.submit', (_$: any, e: any) => ({ text: e.text }))
@@ -295,11 +295,14 @@ const harness = (on: any, http: () => unknown, model: string) => {
       usage: { model, input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 100000, cache_creation_input_tokens: 2000 },
     }
   })
+  return clock
 }
 
 test('with a price it shows an estimated cost, dated model ids and tiers included', async ($, on) => {
-  harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: PRICING_MD } }), 'claude-opus-5-5-20260101')
+  const clock = harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: PRICING_MD } }), 'claude-opus-5-5-20260101')
   await $.prompt.submit({ text: 'go' } as never)
+  // the prices are fetched from a timer, as a dispatch of their own
+  await clock.settle()
   await spend($, 'claude-opus-5-5-20260101')
 
   // (1000*4 + 2000*5 + 100000*0.2 + 500*20) / 1e6 = $0.044
@@ -313,8 +316,10 @@ test('with a price it shows an estimated cost, dated model ids and tiers include
 })
 
 test('a model whose price is not on the page is left out, with no estimate', async ($, on) => {
-  harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: PRICING_MD } }), 'claude-unlisted-9')
+  const clock = harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: PRICING_MD } }), 'claude-unlisted-9')
   await $.prompt.submit({ text: 'go' } as never)
+  // the prices are fetched from a timer, as a dispatch of their own
+  await clock.settle()
   await spend($, 'claude-unlisted-9')
 
   const pane = await $.ui.mount(PANE as never)
@@ -324,8 +329,10 @@ test('a model whose price is not on the page is left out, with no estimate', asy
 })
 
 test('when the prices cannot be fetched nothing is estimated and nothing breaks', async ($, on) => {
-  harness(on, () => ({ value: { status: 503, ok: false, headers: {}, text: '' } }), 'claude-opus-5-5')
+  const clock = harness(on, () => ({ value: { status: 503, ok: false, headers: {}, text: '' } }), 'claude-opus-5-5')
   await $.prompt.submit({ text: 'go' } as never)
+  // the prices are fetched from a timer, as a dispatch of their own
+  await clock.settle()
   await spend($, 'claude-opus-5-5')
 
   const pane = await $.ui.mount(PANE as never)
@@ -339,8 +346,10 @@ test('when the prices cannot be fetched nothing is estimated and nothing breaks'
 const REAL_PRICING_MD = "| Model                                                                                                                                | Base input tokens     | 5m cache writes | 1h cache writes | Cache hits and refreshes | Output tokens          |\n| Claude Fable 5.1                                                                                                                     | $10 / MTok            | $12.50 / MTok   | $20 / MTok      | $0.25 / MTok<sup>1</sup> | $50 / MTok             |\n| Claude Mythos 5.1 ([limited availability](https://support.claude.com/en/articles/14604842))                                          | $10 / MTok            | $12.50 / MTok   | $20 / MTok      | $0.25 / MTok<sup>1</sup> | $50 / MTok             |\n| Claude Fable 5                                                                                                                       | $10 / MTok            | $12.50 / MTok   | $20 / MTok      | $1 / MTok                | $50 / MTok             |\n| Claude Mythos 5 ([limited availability](https://support.claude.com/en/articles/14604842))                                            | $10 / MTok            | $12.50 / MTok   | $20 / MTok      | $1 / MTok                | $50 / MTok             |\n| Claude Opus 5.5                                                                                                                      | $4 / MTok             | $5 / MTok       | $8 / MTok       | $0.20 / MTok<sup>2</sup> | $20 / MTok             |\n| Claude Opus 5                                                                                                                        | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.8                                                                                                                      | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.7                                                                                                                      | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.6                                                                                                                      | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.5                                                                                                                      | $5 / MTok             | $6.25 / MTok    | $10 / MTok      | $0.50 / MTok             | $25 / MTok             |\n| Claude Opus 4.1 ([retired, except on Bedrock and Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations)) | $15 / MTok            | $18.75 / MTok   | $30 / MTok      | $1.50 / MTok             | $75 / MTok             |\n| Claude Opus 4 ([retired, except on Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations))               | $15 / MTok            | $18.75 / MTok   | $30 / MTok      | $1.50 / MTok             | $75 / MTok             |\n| Claude Sonnet 5.5                                                                                                                    | $2 / MTok             | $2.50 / MTok    | $4 / MTok       | $0.10 / MTok<sup>2</sup> | $10 / MTok             |\n| Claude Sonnet 5                                                                                                                      | $2 / MTok<sup>3</sup> | $2.50 / MTok    | $4 / MTok       | $0.20 / MTok             | $10 / MTok<sup>3</sup> |\n| Claude Sonnet 4.6                                                                                                                    | $3 / MTok             | $3.75 / MTok    | $6 / MTok       | $0.30 / MTok             | $15 / MTok             |\n| Claude Sonnet 4.5                                                                                                                    | $3 / MTok             | $3.75 / MTok    | $6 / MTok       | $0.30 / MTok             | $15 / MTok             |\n| Claude Sonnet 4 ([retired, except on Bedrock and Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations)) | $3 / MTok             | $3.75 / MTok    | $6 / MTok       | $0.30 / MTok             | $15 / MTok             |\n| Claude Haiku 5.5 (for prompts up to 100,000 tokens)                                                                                  | $0.10 / MTok          | $0.125 / MTok   | $0.20 / MTok    | $0.01 / MTok             | $0.50 / MTok           |\n| Claude Haiku 5.5 (for prompts over 100,000 tokens)                                                                                   | $0.50 / MTok          | $0.625 / MTok   | $1 / MTok       | $0.05 / MTok             | $2.50 / MTok           |\n| Claude Haiku 4.5                                                                                                                     | $1 / MTok             | $1.25 / MTok    | $2 / MTok       | $0.10 / MTok             | $5 / MTok              |\n| Claude Haiku 3.5 ([retired, except on Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations))            | $0.80 / MTok          | $1 / MTok       | $1.60 / MTok    | $0.08 / MTok             | $4 / MTok              |"
 
 test('the real pricing page layout parses, and an Opus 5.5 request is priced from it', async ($, on) => {
-  harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: REAL_PRICING_MD } }), 'claude-opus-5-5')
+  const clock = harness(on, () => ({ value: { status: 200, ok: true, headers: {}, text: REAL_PRICING_MD } }), 'claude-opus-5-5')
   await $.prompt.submit({ text: 'go' } as never)
+  // the prices are fetched from a timer, as a dispatch of their own
+  await clock.settle()
   await spend($, 'claude-opus-5-5')
 
   const pane = await $.ui.mount(PANE as never)
