@@ -213,42 +213,123 @@ const tally = (old: Ledger, agentId: string, b: Tok, turnId?: string): Ledger =>
 }
 const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
 
+// Text that is not ours (a model-chosen command, a tool, agent or task name, a
+// model id, an error) reaches the screen, so it is cleaned where it enters state.
+// Every C0/C1 control character goes (so no escape or OSC sequence can be built),
+// and so do the line and paragraph separators and the bidi and zero-width
+// controls; whitespace is collapsed and the length clamped.
+const WHITE = /[\t\n\v\f\r\u0085\u2028\u2029]+/g
+const CONTROLS = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+const clean = (text: unknown, max: number): string => {
+  const s = String(text ?? '')
+    .replace(WHITE, ' ')
+    .replace(CONTROLS, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (s.length <= max) return s
+  // never cut a surrogate pair in half
+  const cut = /[\ud800-\udbff]/.test(s.charAt(max - 2)) ? max - 2 : max - 1
+  return `${s.slice(0, Math.max(0, cut))}…`
+}
+
 // Secrets are cut out of a hint BEFORE it is shortened, because the hint is
 // shown on screen and kept in state. Every pattern is linear-time: no nested
 // quantifiers, and the open-ended ones are bounded.
-const SENSITIVE = /token|secret|passw(?:or)?d|pwd|api[-_]?key|auth|credential/i
-const SECRET_SHAPES =
-  /\bsk-ant-[\w-]+|\bsk-[\w-]{8,}|\bgh[pos]_\w+|\bgithub_pat_\w+|\bxox[abprs]-[\w-]+|\bAKIA[0-9A-Z]{16}/g
-const VALUE = `"[^"]{0,200}"|'[^']{0,200}'|[^\\s"'&;|]+`
-const KEY_VALUE = new RegExp(`([\\w.-]{1,64})(["']?\\s*[=:]\\s*)(${VALUE})`, 'g')
-const FLAG_VALUE = new RegExp(`(--?[\\w.-]{1,64})(\\s+)("[^"]{0,200}"|'[^']{0,200}'|[^\\s"'&;|-][^\\s"'&;|]*)`, 'g')
+const SENSITIVE_PART =
+  /token|secret|passw(?:or)?d|pwd|passphrase|api[-_]?key|auth|credential|cookie|bearer|signature|sess(?:ion)?id(?![a-z])/i
+// names that are sensitive as a whole segment (`api_key`, `KEY`, `accessKey`; not `monkey`)
+const SENSITIVE_SEGMENTS = new Set(['pass', 'key', 'sig', 'private', 'dsn', 'cred', 'creds'])
+const SESSION_FORMS = new Set(['session', 'id', 'token', 'key', 'secret', 'cookie'])
+const isSensitive = (name: string) => {
+  if (SENSITIVE_PART.test(name)) return true
+  // split on - _ . and camelCase boundaries
+  const parts = name
+    .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z\d]+/)
+    .filter(p => p !== '')
+  if (parts.some(p => SENSITIVE_SEGMENTS.has(p))) return true
+  return parts.includes('session') && parts.every(p => SESSION_FORMS.has(p))
+}
+const SECRET_SHAPES = new RegExp(
+  [
+    'sk-ant-[\\w-]+',
+    'sk-[\\w-]{8,}',
+    'gh[pousr]_\\w+',
+    'github_pat_\\w+',
+    'xox[abprs]-[\\w-]+',
+    'xapp-[\\w-]+',
+    'glpat-[\\w-]+',
+    'npm_[A-Za-z0-9]{36}',
+    'pypi-[\\w-]{20,}',
+    'AKIA[0-9A-Z]{16}',
+    'AIza[\\w-]{35}',
+    // a JSON web token: header.payload.signature
+    'eyJ[\\w-]{8,}\\.[\\w-]{8,}(?:\\.[\\w-]{0,500})?',
+  ]
+    .map(p => `\\b${p}`)
+    .join('|'),
+  'g',
+)
+// A value: quoted (also inside an escaped quote, as in JSON within a shell
+// string), a quote left open, or a bare word.
+const VALUE = `\\\\?"[^"]{0,200}\\\\?"|\\\\?'[^']{0,200}\\\\?'|\\\\?["'][^"']{0,300}|[^\\s"'&;|]+`
+const keyValue = () => new RegExp(`([\\w.-]{1,64})(\\\\?["']?\\s*[=:]\\s*)(${VALUE})`, 'g')
+const FLAG_VALUE = new RegExp(
+  `(--?[\\w.-]{1,64})(\\s+)("[^"]{0,200}"|'[^']{0,200}'|["'][^"']{0,300}|[^\\s"'&;|-][^\\s"'&;|]*)`,
+  'g',
+)
+// curl -u user:pass, --user user:pass: the value of -u/--user that holds a colon
+const USER_FLAG = /(^|\s)(-u\s*|--(?:proxy-)?user(?:\s+|=))("[^"]{0,200}"|'[^']{0,200}'|[^\s"'&;|]{1,200})/g
+// key=value, key: value and NAME=value cmd (also `export NAME=value`). A value
+// that holds a pair itself (--env=API_KEY=abc) is looked into.
+const hidePairs = (text: string, depth: number): string =>
+  text.replace(keyValue(), (m, key: string, sep: string, value: string) => {
+    if (isSensitive(key)) return `${key}${sep}…`
+    return depth < 2 && /[=:]/.test(value) ? `${key}${sep}${hidePairs(value, depth + 1)}` : m
+  })
+// A long base64-looking run. One that looks like a path stays: it starts with a
+// `/`, has slashes and no digit, or is followed by `.ext`.
+const hideRuns = (text: string) =>
+  text.replace(/[A-Za-z0-9+/]{32,}/g, (run: string, at: number, whole: string) => {
+    const hasLetter = /[A-Za-z]/.test(run)
+    const hasDigit = /\d/.test(run)
+    const isMixed = /[a-z]/.test(run) && /[A-Z]/.test(run)
+    if (hasDigit && hasLetter && (!run.includes('/') || isMixed)) return '…'
+    if (run.length < 40 || !hasLetter || isMixed || run.startsWith('/')) return run
+    if (run.includes('/') && !hasDigit) return run
+    return /^\.[A-Za-z][A-Za-z0-9]{0,4}\b/.test(whole.slice(at + run.length, at + run.length + 8)) ? run : '…'
+  })
 const redact = (text: string) =>
-  text
-    // https://user:pass@host/p?a=b#c -> https://…@host/p?…  (one pass over each URL)
-    .replace(/[a-z][a-z0-9+.-]{0,20}:\/\/[^\s"']*/gi, url => {
-      const start = url.indexOf('://') + 3
-      let end = start
-      while (end < url.length && url[end] !== '/' && url[end] !== '?' && url[end] !== '#') end++
-      const at = url.lastIndexOf('@', end - 1)
-      const host = at >= start ? `…@${url.slice(at + 1, end)}` : url.slice(start, end)
-      const rest = url.slice(end)
-      const cut = rest.search(/[?#]/)
-      return `${url.slice(0, start)}${host}${cut < 0 ? rest : `${rest.slice(0, cut)}?…`}`
-    })
-    // Authorization: Bearer x, and a bare Bearer x
-    .replace(/(authorization["']?\s*[=:]\s*)(?:(?:bearer|basic|token|digest)\s+)?[^\s"']+/gi, '$1…')
-    .replace(/\bbearer\s+[^\s"']+/gi, 'Bearer …')
-    // well-known token shapes, and long hex / base64 runs
-    .replace(SECRET_SHAPES, '…')
-    .replace(/[A-Za-z0-9+/]{32,}/g, run =>
-      /\d/.test(run) && /[A-Za-z]/.test(run) && (!run.includes('/') || (/[a-z]/.test(run) && /[A-Z]/.test(run)))
-        ? '…'
-        : run,
-    )
-    // key=value, key: value and NAME=value cmd (also `export NAME=value`)
-    .replace(KEY_VALUE, (m, key: string, sep: string) => (SENSITIVE.test(key) ? `${key}${sep}…` : m))
+  hidePairs(
+    hideRuns(
+      text
+        // https://user:pass@host/p?a=b#c -> https://…@host/p?…  (one pass over each URL)
+        .replace(/[a-z][a-z0-9+.-]{0,20}:\/\/[^\s"']*/gi, url => {
+          const start = url.indexOf('://') + 3
+          let end = start
+          while (end < url.length && url[end] !== '/' && url[end] !== '?' && url[end] !== '#') end++
+          const at = url.lastIndexOf('@', end - 1)
+          const host = at >= start ? `…@${url.slice(at + 1, end)}` : url.slice(start, end)
+          const rest = url.slice(end)
+          const cut = rest.search(/[?#]/)
+          return `${url.slice(0, start)}${host}${cut < 0 ? rest : `${rest.slice(0, cut)}?…`}`
+        })
+        // Authorization: <any scheme> x, the whole credential
+        .replace(/(authorization["']?\s*[=:]\s*)(?:[A-Za-z][\w-]{0,30}\s+)?[^\s"']+/gi, '$1…')
+        // Cookie: and Set-Cookie: hold a list of pairs, up to the end of the header
+        .replace(/(cookie["']?\s*[=:]\s*)[^"']{1,400}/gi, '$1…')
+        .replace(/\bbearer\s+[^\s"']+/gi, 'Bearer …')
+        .replace(USER_FLAG, (m, pre: string, flag: string, value: string) =>
+          value.includes(':') ? `${pre}${flag}…` : m,
+        )
+        // well-known token shapes
+        .replace(SECRET_SHAPES, '…'),
+    ),
+    0,
+  )
     // --flag value
-    .replace(FLAG_VALUE, (m, flag: string, space: string) => (SENSITIVE.test(flag) ? `${flag}${space}…` : m))
+    .replace(FLAG_VALUE, (m, flag: string, space: string) => (isSensitive(flag) ? `${flag}${space}…` : m))
 
 // The most telling argument of a tool call, as one short string for the pane.
 const hintOf = (input: object) => {
@@ -256,7 +337,8 @@ const hintOf = (input: object) => {
   for (const key of ['file_path', 'path', 'pattern', 'command', 'query', 'url', 'description']) {
     const v = o[key]
     if (typeof v === 'string' && v !== '') {
-      const one = redact(v.replace(/\s+/g, ' ').trim())
+      const one = redact(clean(v, 600))
+      if (one === '') continue
       return one.length > 36 ? `${one.slice(0, 35)}…` : one
     }
   }
@@ -292,11 +374,17 @@ const setupKids = (Text: any, model: string, effort: string): unknown[] => [
   <Text key="model" color={SETUP_COLOR} dimColor={false}>{shortModel(model)}</Text>,
   ...(effort === ''
     ? []
-    : [' · ', <Text key="effort" color={SETUP_COLOR} dimColor={false}>{`effort ${effort}`}</Text>]),
+    : [' · ', <Text key="effort" color={SETUP_COLOR} dimColor={false}>{`effort ${clean(effort, 20)}`}</Text>]),
 ]
 
-// claude-haiku-5-5-20260101 -> haiku-5-5
-const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+// claude-haiku-5-5-20260101 -> haiku-5-5. Only the characters of a model id are
+// shown, at most 80 of them.
+const shortModel = (id: string) =>
+  id
+    .replace(/[^A-Za-z0-9._[\]-]/g, '')
+    .slice(0, 80)
+    .replace(/^claude-/, '')
+    .replace(/-\d{8}$/, '')
 
 const HISTORY_SHOWN = 6
 // In the history a finished agent is no longer news: its marker goes gray (a
@@ -551,7 +639,8 @@ async function restoreLedger($: EngineInterface) {
 // Remember which model (and effort, when it is known) an agent runs on. Effort is
 // only reported with a model request, so an agent whose requests never reach the
 // hooks has a model (from its spawn or its transcript) and no effort.
-async function noteSetup($: EngineInterface, agentId: string, model: string, effort = '') {
+async function noteSetup($: EngineInterface, agentId: string, rawModel: string, effort = '') {
+  const model = clean(rawModel, 120)
   if (model === '') return
   await update($, setups, list => {
     const had = list.find(x => x.agentId === agentId)
@@ -673,9 +762,9 @@ async function refresh($: EngineInterface) {
   const list = await $.agent.list()
   const rows: AgentRow[] = list.map(a => ({
     id: a.id,
-    label: a.description || a.name || a.type,
-    name: a.name ?? '',
-    type: a.type,
+    label: clean(a.description, 120) || clean(a.name, 60) || clean(a.type, 60),
+    name: clean(a.name, 60),
+    type: clean(a.type, 60),
     status: a.status,
   }))
   const now = await $.clock.now()
@@ -870,7 +959,7 @@ export const register: Register = on => {
     const call: Call = {
       id: e.tool_use_id,
       agentId: e.agentId ?? MAIN,
-      tool: String(e.tool),
+      tool: clean(e.tool, 60),
       hint: hintOf(e),
       status: 'running',
       startedAt: await $.clock.now(),
@@ -895,12 +984,13 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     try {
       const agentId = e.agentId ?? MAIN
-      const effort = e.effort === undefined ? '' : String(e.effort)
+      const effort = e.effort === undefined ? '' : clean(e.effort, 20)
+      const model = clean(e.model, 120)
       const known = await read($, setups)
       const now = known.find(x => x.agentId === agentId)
-      if (now === undefined || now.model !== e.model || now.effort !== effort) {
+      if (now === undefined || now.model !== model || now.effort !== effort) {
         await update($, setups, list =>
-          prune([...list.filter(x => x.agentId !== agentId), { agentId, model: e.model, effort }]),
+          prune([...list.filter(x => x.agentId !== agentId), { agentId, model, effort }]),
         )
       }
     } catch {
@@ -926,7 +1016,7 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
     await update($, todos, () =>
-      e.todos.map((t, i) => ({ id: `todo-${i}`, content: t.content, status: t.status })),
+      e.todos.map((t, i) => ({ id: `todo-${i}`, content: clean(t.content, 200) || `task ${i + 1}`, status: t.status })),
     )
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -937,7 +1027,7 @@ export const register: Register = on => {
       const { id, subject } = ran.result.task
       await update($, todos, list => [
         ...list.filter(t => t.id !== id),
-        { id, content: subject, status: 'pending' },
+        { id, content: clean(subject, 200) || `task ${id}`, status: 'pending' },
       ])
     }
     return ran
@@ -951,12 +1041,13 @@ export const register: Register = on => {
           return list.filter(t => t.id !== e.taskId)
         }
         const known = list.some(t => t.id === e.taskId)
+        const subject = e.subject === undefined ? '' : clean(e.subject, 200)
         const base = known
           ? list
-          : [...list, { id: e.taskId, content: e.subject ?? `task ${e.taskId}`, status: 'pending' as const }]
+          : [...list, { id: e.taskId, content: subject || `task ${e.taskId}`, status: 'pending' as const }]
         return base.map(t =>
           t.id === e.taskId
-            ? { ...t, content: e.subject ?? t.content, status: e.status ?? t.status }
+            ? { ...t, content: subject || t.content, status: e.status ?? t.status }
             : t,
         )
       })
@@ -1250,7 +1341,7 @@ export const register: Register = on => {
           counted: {dg.withUsage}/{dg.steps} requests ({dg.subSteps} from subagents) · {dg.completes} turns ·{' '}
           {dg.transcripts} subagent transcripts ·{' '}
           {known === null ? 'no prices' : `${known.rows.length} prices`}
-          {dg.error === '' ? '' : ` · error: ${dg.error}`}
+          {clean(dg.error, 120) === '' ? '' : ` · error: ${clean(dg.error, 120)}`}
         </Text>
       </Box>
     )
