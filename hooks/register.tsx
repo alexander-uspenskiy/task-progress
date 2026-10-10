@@ -60,10 +60,12 @@ const ledger = atom({ plugin: 'task-progress', key: 'ledger1' } as const, {
 // List prices, fetched from Anthropic's pricing page and refreshed daily. Absent
 // until a fetch has worked: with no price for a model no cost is shown for it.
 const prices = atom({ plugin: 'task-progress', key: 'prices1' } as const, null)
-const diag = atom({ plugin: 'task-progress', key: 'diag' } as const, {
+const diag = atom({ plugin: 'task-progress', key: 'diag2' } as const, {
   steps: 0,
   withUsage: 0,
+  subSteps: 0,
   completes: 0,
+  transcripts: 0,
   error: '',
 })
 const setups = atom({ plugin: 'task-progress', key: 'setups' } as const, [])
@@ -174,7 +176,15 @@ const prune = <T extends { agentId: string }>(list: T[]): T[] => {
 }
 // One request's tokens, added to the turn and the agent (and to what the
 // turn's own requests have counted, when they say which turn they are).
-const tally = (l: Ledger, agentId: string, b: Tok, turnId?: string): Ledger => {
+// A ledger written by an older build may lack fields a newer one reads: fill them in.
+const norm = (l: Partial<Ledger> | undefined): Ledger => ({
+  turn: { ...NONE, ...(l?.turn ?? {}) },
+  agents: (l?.agents ?? []).map(a => ({ ...NONE, ...a })),
+  seen: l?.seen ?? [],
+  retired: { ...NONE, ...(l?.retired ?? {}) },
+})
+const tally = (old: Ledger, agentId: string, b: Tok, turnId?: string): Ledger => {
+  const l = norm(old)
   const prev = l.agents.find(x => x.agentId === agentId)
   const sum: Usage = { agentId, ...addTok(prev ?? NONE, b) }
   const had = turnId === undefined ? undefined : l.seen.find(x => x.turnId === turnId)
@@ -452,7 +462,8 @@ async function count($: EngineInterface, agentId: string, c: Counts, model: stri
 // no report (an aborted turn) there is nothing to add, but the entry still goes.
 async function reconcile($: EngineInterface, turnId: string, agentId: string, u: (Parameters<typeof bumpOf>[0] & { model: string }) | undefined) {
   const list = u === undefined ? null : await read($, prices)
-  await update($, ledger, l => {
+  await update($, ledger, old => {
+    const l = norm(old)
     const rest: Ledger = { ...l, seen: l.seen.filter(x => x.turnId !== turnId) }
     if (u === undefined) return rest
     const had = l.seen.find(x => x.turnId === turnId)
@@ -485,10 +496,117 @@ async function reset($: EngineInterface) {
     expectedTools: 8,
     expectedSeconds: 60,
   }))
-  await update($, diag, () => ({ steps: 0, withUsage: 0, completes: 0, error: '' }))
+  await update($, diag, () => ({ steps: 0, withUsage: 0, subSteps: 0, completes: 0, transcripts: 0, error: '' }))
+}
+
+// The ledger is kept in the plugin store under the session's id, so a reload of
+// the mod, a restart, or a state value the engine could not keep does not lose the
+// session's totals. Written at most every 2 s (and at the end of a turn).
+const SAVED = 'ledger:'
+const KEEP_SAVED = 8
+let savedJson = ''
+let savedAt = 0
+const tried = new Set<string>()
+async function saveLedger($: EngineInterface, force = false) {
+  try {
+    const now = await $.clock.now()
+    if (!force && now - savedAt < 2000) return
+    const l = norm(await read($, ledger))
+    const json = JSON.stringify(l)
+    if (json === savedJson) return
+    savedJson = json
+    savedAt = now
+    await $.store.set(`${SAVED}${await $.session.id()}`, { at: now, ledger: l })
+    const keys = (await $.store.keys()).filter(k => k.startsWith(SAVED))
+    if (keys.length > KEEP_SAVED) {
+      const rows: { k: string; at: number }[] = []
+      for (const k of keys) {
+        const v = (await $.store.get(k)) as { at?: number } | undefined
+        rows.push({ k, at: Number(v?.at ?? 0) })
+      }
+      rows.sort((a, b) => a.at - b.at)
+      for (const r of rows.slice(0, rows.length - KEEP_SAVED)) await $.store.delete(r.k)
+    }
+  } catch {
+    // totals just stay in memory
+  }
+}
+// Back from the store when the in-memory ledger is empty (a reload cleared it).
+async function restoreLedger($: EngineInterface) {
+  try {
+    const l = norm(await read($, ledger))
+    if (l.agents.length > 0 || l.retired.input + l.retired.output + l.retired.cached > 0) return
+    const saved = (await $.store.get(`${SAVED}${await $.session.id()}`)) as { ledger?: Partial<Ledger> } | undefined
+    if (saved?.ledger === undefined) return
+    await update($, ledger, () => norm(saved.ledger))
+    savedJson = ''
+  } catch {
+    // start from nothing
+  }
+}
+
+// What a subagent's own transcript says it used (the API's usage, once per message).
+// The model requests of a subagent may not reach this plugin's hooks, so when it
+// stops, anything the live counting missed is added from here.
+const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0)
+async function creditTranscript($: EngineInterface, agentId: string, path: string) {
+  try {
+    const text = await $.fs.read(path)
+    const list = await read($, prices)
+    // A message is written several times as it streams, the first lines with partial
+    // counts (an output of 16 that ends at 196): keep the largest of each field.
+    const byMessage = new Map<string, { model: string; c: Counts }>()
+    for (const line of text.split('\n')) {
+      if (line.length === 0 || line.length > 2_000_000) continue
+      let row: { type?: string; message?: { id?: string; model?: string; usage?: Record<string, unknown> } }
+      try {
+        row = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const m = row.message
+      if (row.type !== 'assistant' || m === undefined || m.usage === undefined || typeof m.id !== 'string') continue
+      const seen = byMessage.get(m.id)
+      const c: Counts = {
+        input: Math.max(seen?.c.input ?? 0, num(m.usage.input_tokens)),
+        output: Math.max(seen?.c.output ?? 0, num(m.usage.output_tokens)),
+        cached: Math.max(seen?.c.cached ?? 0, num(m.usage.cache_read_input_tokens)),
+        written: Math.max(seen?.c.written ?? 0, num(m.usage.cache_creation_input_tokens)),
+      }
+      byMessage.set(m.id, { model: String(m.model ?? seen?.model ?? ''), c })
+    }
+    let total: Tok = NONE
+    for (const { model, c } of byMessage.values()) {
+      const cost = costOf(list, model, c)
+      total = addTok(total, { ...c, cost: cost ?? 0, unpriced: cost === undefined ? 1 : 0 })
+    }
+    // only what live counting has not already counted
+    let added = false
+    await update($, ledger, old => {
+      const l = norm(old)
+      added = false
+      const have = l.agents.find(x => x.agentId === agentId)
+      const gap = (a: number, b: number | undefined) => Math.max(0, a - (b ?? 0))
+      const missing: Tok = {
+        input: gap(total.input, have?.input),
+        output: gap(total.output, have?.output),
+        cached: gap(total.cached, have?.cached),
+        written: gap(total.written, have?.written),
+        cost: gap(total.cost, have?.cost),
+        unpriced: have === undefined ? total.unpriced : 0,
+      }
+      if (missing.input + missing.output + missing.cached + missing.written === 0) return l
+      added = true
+      return tally(l, agentId, missing)
+    })
+    if (added) await update($, diag, d => ({ ...d, transcripts: d.transcripts + 1 }))
+  } catch (err) {
+    await update($, diag, d => ({ ...d, error: `transcript: ${String(err).slice(0, 100)}` }))
+  }
 }
 
 async function refresh($: EngineInterface) {
+  await saveLedger($)
   const list = await $.agent.list()
   const rows: AgentRow[] = list.map(a => ({
     id: a.id,
@@ -537,6 +655,7 @@ export const register: Register = on => {
   let isLoading = false
 
   on('session.start', async ($, e, next) => {
+    await restoreLedger($)
     // The fetch runs from a timer, as a dispatch of its own: it can never hold
     // this hook up.
     pricing?.cancel()
@@ -571,6 +690,13 @@ export const register: Register = on => {
     } catch {
       // a failed reset must not hold up the session's end
     }
+    try {
+      // the session is over: its saved totals go with it
+      await $.store.delete(`${SAVED}${await $.session.id()}`)
+      savedJson = ''
+    } catch {
+      // the saved copy stays; a new session has an id of its own
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -580,6 +706,7 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await restoreLedger($)
     pricing?.cancel()
     pricing = $.clock.after(0, () => {
       if (isLoading) return
@@ -596,7 +723,7 @@ export const register: Register = on => {
     const expectedSeconds = median(history.map(h => h.seconds), 60)
     await update($, todos, list => list.filter(t => t.status !== 'completed'))
     await update($, calls, list => list.filter(c => c.agentId !== MAIN))
-    await update($, ledger, l => ({ ...l, turn: NONE }))
+    await update($, ledger, l => ({ ...norm(l), turn: NONE }))
     await update($, run, () => ({
       startedAt,
       now: startedAt,
@@ -621,6 +748,33 @@ export const register: Register = on => {
     tick = mine
 
     return next({ ...e, context: [...(e.context ?? []), TASK_HINT] })
+  }).catch(($, e, next) => next(e))
+
+  // A subagent has stopped: read its own transcript for what it spent.
+  on('classic.SubagentStop', async ($, e, next) => {
+    await creditTranscript($, e.agent_id, e.agent_transcript_path)
+    await saveLedger($, true)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The end of a main turn: a subagent that finished with no tokens counted (its
+  // stop event never came, or the plugin was reloaded since) is read from the
+  // `subagents/` folder next to the session's transcript. Each is tried once.
+  on('classic.Stop', async ($, e, next) => {
+    try {
+      const base = e.transcript_path.replace(/\.jsonl$/, '')
+      const seats = await read($, roster)
+      const l = norm(await read($, ledger))
+      for (const s of seats) {
+        if (s.endedAt === 0 || tried.has(s.id)) continue
+        if ((l.agents.find(x => x.agentId === s.id)?.output ?? 0) > 0) continue
+        tried.add(s.id)
+        await creditTranscript($, s.id, `${base}/subagents/agent-${s.id}.jsonl`)
+      }
+    } catch {
+      // nothing to backfill
+    }
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
@@ -677,6 +831,7 @@ export const register: Register = on => {
         ...d,
         steps: d.steps + 1,
         withUsage: d.withUsage + (u === null || u === undefined ? 0 : 1),
+        subSteps: d.subSteps + (e.agentId === undefined ? 0 : 1),
       }))
     } catch (err) {
       await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
@@ -733,6 +888,7 @@ export const register: Register = on => {
     } catch (err) {
       await update($, diag, d => ({ ...d, error: String(err).slice(0, 120) }))
     }
+    await saveLedger($, true)
     // Only the main loop's end ends the run; a subagent's turn also ends here.
     if (e.agentId === undefined) {
       tick?.cancel()
@@ -786,7 +942,7 @@ export const register: Register = on => {
       if (i < SEGMENTS - 1) bar.push(<Text key={`g${i}`}>{' '}</Text>)
     }
     const percent = `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
-    const { turn: thisTurn, agents: perAgent, retired } = await read($, ledger)
+    const { turn: thisTurn, agents: perAgent, retired } = norm(await read($, ledger))
     const session = addTok(sumUsage(perAgent), retired)
     const hasTokens = fullInput(session) + session.output > 0
 
@@ -819,7 +975,7 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const seats = await read($, roster)
     const log = await read($, calls)
-    const { turn: thisTurn, agents: spent, retired } = await read($, ledger)
+    const { turn: thisTurn, agents: spent, retired } = norm(await read($, ledger))
     const configs = await read($, setups)
     const dg = await read($, diag)
     const known = await read($, prices)
@@ -1004,7 +1160,8 @@ export const register: Register = on => {
         )}
         <Text> </Text>
         <Text dimColor wrap="truncate-end">
-          counted: {dg.withUsage}/{dg.steps} requests · {dg.completes} turns ·{' '}
+          counted: {dg.withUsage}/{dg.steps} requests ({dg.subSteps} from subagents) · {dg.completes} turns ·{' '}
+          {dg.transcripts} subagent transcripts ·{' '}
           {known === null ? 'no prices' : `${known.rows.length} prices`}
           {dg.error === '' ? '' : ` · error: ${dg.error}`}
         </Text>

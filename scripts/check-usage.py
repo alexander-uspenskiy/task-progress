@@ -98,6 +98,22 @@ def load(path):
 def k(n):
     return str(n) if n < 1000 else f"{n/1000:.1f}k" if n < 1_000_000 else f"{n/1_000_000:.1f}M"
 
+USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+def largest_usage(rows):
+    """One usage per message id. A message is written several times as it streams and the
+    first lines carry partial counts (an output of 16 that ends at 196), so keep the largest
+    value of each field."""
+    best = {}
+    for r in rows:
+        msg = r.get("message") or {}
+        u, mid = msg.get("usage"), msg.get("id")
+        if r.get("type") == "assistant" and isinstance(u, dict) and mid:
+            b = best.setdefault(mid, {})
+            for f in USAGE_FIELDS:
+                b[f] = max(b.get(f, 0), count(u.get(f)))
+    return best
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     with_sub = "--subagents" in sys.argv
@@ -110,6 +126,7 @@ def main():
     rows.sort(key=lambda r: str(r.get("timestamp", "")))
 
     prices = load_prices()
+    best = largest_usage(rows)
     turns, cur, seen = [], None, set()
     for r in rows:
         msg = r.get("message") or {}
@@ -131,6 +148,7 @@ def main():
             u, mid = msg.get("usage"), msg.get("id")
             if isinstance(u, dict) and mid and mid not in seen:
                 seen.add(mid)
+                u = best[mid]
                 cur["in"] += count(u.get("input_tokens"))
                 cur["out"] += count(u.get("output_tokens"))
                 cur["cr"] += count(u.get("cache_read_input_tokens"))
@@ -147,13 +165,9 @@ def main():
     if with_sub:
         for f in files:
             for sf in glob.glob(f[:-6] + "/subagents/*.jsonl"):
-                ids = set()
-                for r in load(sf):
-                    msg, u = r.get("message") or {}, (r.get("message") or {}).get("usage")
-                    if r.get("type") == "assistant" and isinstance(u, dict) and msg.get("id") not in ids:
-                        ids.add(msg.get("id"))
-                        sub["in"] += count(u.get("input_tokens")); sub["out"] += count(u.get("output_tokens"))
-                        sub["cr"] += count(u.get("cache_read_input_tokens")); sub["cw"] += count(u.get("cache_creation_input_tokens"))
+                for u in largest_usage(load(sf)).values():
+                    sub["in"] += u["input_tokens"]; sub["out"] += u["output_tokens"]
+                    sub["cr"] += u["cache_read_input_tokens"]; sub["cw"] += u["cache_creation_input_tokens"]
 
     print(f"{'time':8} {'req':>3}  {'in':>7} {'(cached)':>9} {'out':>7}  {'(fresh)':>8} {'est. $':>8}  prompt")
     tot = {"in": 0, "out": 0, "cr": 0, "cw": 0}

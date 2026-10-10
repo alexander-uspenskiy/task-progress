@@ -241,7 +241,7 @@ test('a turn whose requests report no usage is still counted from its closing re
     },
   } as never)
   expect(await pane.find({ type: 'Text', text: /^\s*450 in \(300 cached\) · 200 out$/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /counted: 0\/1 requests · 1 turns/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /counted: 0\/1 requests \(\d+ from subagents\) · 1 turns/ })).toBeDefined()
   await pane.unmount()
 })
 

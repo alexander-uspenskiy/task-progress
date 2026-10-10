@@ -122,7 +122,7 @@ test('a turn without usage in its steps is counted once from its closing report,
   await complete($, 'z', usageOf(100, 200, 300, 50))
   let ui = await pane($)
   expect(await sessionText(ui, /^\s*450 in \(300 cached\) · 200 out$/)).toBeDefined()
-  expect(await sessionText(ui, /counted: 0\/1 requests · 1 turns/)).toBeDefined()
+  expect(await sessionText(ui, /counted: 0\/1 requests \(\d+ from subagents\) · 1 turns/)).toBeDefined()
   await ui.unmount()
 
   // turn y: its step already counted everything, so the closing report adds nothing
@@ -131,7 +131,7 @@ test('a turn without usage in its steps is counted once from its closing report,
   await complete($, 'y', usageOf(10, 20, 30, 5))
   ui = await pane($)
   expect(await sessionText(ui, /^\s*495 in \(330 cached\) · 220 out$/)).toBeDefined()
-  expect(await sessionText(ui, /counted: 1\/2 requests · 2 turns/)).toBeDefined()
+  expect(await sessionText(ui, /counted: 1\/2 requests \(\d+ from subagents\) · 2 turns/)).toBeDefined()
   await ui.unmount()
 
   // a report larger than what the steps counted adds only the difference
@@ -197,7 +197,7 @@ test('session.end with reason clear resets every figure; fetched prices stay', a
   expect(await sessionText(after, /103\.0k/)).toBeUndefined()
   expect(await sessionText(after, /no tokens yet/)).toBeDefined()
   expect(await sessionText(after, /0 tools/)).toBeDefined()
-  expect(await sessionText(after, /counted: 0\/0 requests · 0 turns/)).toBeDefined()
+  expect(await sessionText(after, /counted: 0\/0 requests \(\d+ from subagents\) · 0 turns/)).toBeDefined()
   // the prices are not part of the session
   expect(await sessionText(after, /5 prices/)).toBeDefined()
   await after.unmount()

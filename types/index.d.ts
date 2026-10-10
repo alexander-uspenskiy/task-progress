@@ -36,7 +36,14 @@ export type PriceRow = {
 }
 export type Prices = { fetchedAt: number; rows: PriceRow[] }
 export type Seen = { turnId: string } & Counts
-export type Diag = { steps: number; withUsage: number; completes: number; error: string }
+export type Diag = {
+  steps: number
+  withUsage: number
+  subSteps: number
+  completes: number
+  transcripts: number
+  error: string
+}
 // One agent's tokens for the whole session.
 export type Usage = { agentId: string } & Tok
 // Every token figure, kept in ONE atom and written by one update per model request so the
@@ -66,7 +73,7 @@ declare module 'claude-code' {
       setups: Setup[]
       roster1: Seat[]
       prices1: Prices | null
-      diag: Diag
+      diag2: Diag
     }
   }
 }
