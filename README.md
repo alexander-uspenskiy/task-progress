@@ -3,7 +3,7 @@
 A Claude Code mod: a progress bar above the prompt while a task runs, and an Agents pane that lists the main agent and every subagent with their tools, status and token usage.
 
 - **Bar** follows the model's task list (`TaskCreate` / `TaskUpdate`, and `TodoWrite`); with no list it counts finished subagents. Colors are theme keys, so it follows dark / light / auto.
-- **Agents pane** shows token totals (session and turn), a card for the main agent, and one for every subagent (model, effort, tools, status) with a small icon for its kind, refreshed every second. `/task-agents` reopens it.
+- **Agents pane** shows token totals (session and turn), a card for the main agent, and one for every subagent (model, effort, tools, status) with a small icon for its kind, refreshed every second. Finished subagents leave the cards and move into a short history, with the tokens they spent. `/task-agents` reopens it.
 
 ## Install
 
@@ -50,6 +50,15 @@ Each card in the Agents pane shows a small emoji after its status icon, picked f
 Rules are checked top to bottom against the lowercased text `<type> <name>`, the first match wins, and the main agent is always 🧠.
 
 The table lives in the `ICON_RULES` list at the top of `hooks/register.tsx`, so it can be edited or extended there.
+
+## Subagent history
+
+A finished subagent (completed, failed, killed, or gone from the engine's agent list) leaves its card and becomes one line in **History**, newest first, with its status and kind icons, name, tokens, tool count, duration and description. The last 6 are shown. The heading gives the shown and finished counts, the total tokens spent by all subagents so far, and an estimated cost when a price is known; tokens are input + output, where input includes cached input. The history lasts for the session and starts empty in a new session.
+
+```
+History · 3 of 8 finished · 305.1k tok · est. $0.12
+● 🔍 Explore · 101.5k tok · 0 tools · 5s · find hooks
+```
 
 ## Check the token figures
 

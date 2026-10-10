@@ -8,6 +8,7 @@ import type {
   PriceRow,
   Prices,
   Run,
+  Seat,
   Seen,
   Setup,
   Tok,
@@ -54,6 +55,9 @@ const diag = atom({ plugin: 'task-progress', key: 'diag' } as const, {
   error: '',
 })
 const setups = atom({ plugin: 'task-progress', key: 'setups' } as const, [])
+// Every subagent seen this session, so a finished one stays in the history after
+// the engine's agent list has dropped it.
+const roster = atom({ plugin: 'task-progress', key: 'roster1' } as const, [])
 const agents = atom({ plugin: 'task-progress', key: 'agents' } as const, [])
 const run = atom({ plugin: 'task-progress', key: 'run' } as const, {
   startedAt: 0,
@@ -167,6 +171,13 @@ const tokText = (t: Tok) =>
 
 // claude-haiku-5-5-20260101 -> haiku-5-5
 const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+
+const HISTORY_SHOWN = 6
+// 5s, 1m05s
+const span = (ms: number) => {
+  const s = Math.max(0, Math.round(ms / 1000))
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
+}
 
 const clock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -312,6 +323,26 @@ async function refresh($: EngineInterface) {
   const now = await $.clock.now()
   await update($, agents, () => rows)
   await update($, run, r => ({ ...r, now }))
+  await update($, roster, old => {
+    const listed = new Set(rows.map(r => r.id))
+    // gone from the engine's list: it has ended
+    const kept: Seat[] = old.map(s =>
+      listed.has(s.id) || s.endedAt > 0
+        ? s
+        : { ...s, status: FINISHED.includes(s.status) ? s.status : 'completed', endedAt: now },
+    )
+    for (const r of rows) {
+      const had = kept.findIndex(s => s.id === r.id)
+      const isOver = FINISHED.includes(r.status)
+      if (had < 0) {
+        kept.push({ ...r, firstSeen: now, endedAt: isOver ? now : 0 })
+      } else {
+        const was = kept[had] as Seat
+        kept[had] = { ...was, ...r, endedAt: isOver ? was.endedAt || now : 0 }
+      }
+    }
+    return kept.slice(-40)
+  })
 }
 
 export const register: Register = on => {
@@ -578,7 +609,7 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const rows = await read($, agents)
+    const seats = await read($, roster)
     const log = await read($, calls)
     const spent = await read($, usage)
     const configs = await read($, setups)
@@ -661,12 +692,17 @@ export const register: Register = on => {
       </Box>
     )
 
-    const running = rows.filter(a => !FINISHED.includes(a.status)).length
+    // Still going: a card each. Ended: one line each in the history below.
+    const rows = seats.filter(s => s.endedAt === 0)
+    const running = rows.length
+    const ended = seats.filter(s => s.endedAt > 0).sort((a, b) => b.endedAt - a.endedAt)
+    const shownEnded = Math.min(HISTORY_SHOWN, ended.length, Math.max(2, Math.floor(room / 4)))
+    const everyone = sumUsage(spent.filter(x => x.agentId !== MAIN))
 
     // Subagents: newest first; each takes a card of a few lines, until the
-    // pane is full.
+    // pane is full (the history keeps its lines first).
     const blocks = []
-    let used = mainUsed + 5
+    let used = mainUsed + 5 + (ended.length > 0 ? 2 + shownEnded : 0)
     for (const a of [...rows].reverse()) {
       const mine = log.filter(c => c.agentId === a.id)
       const recent = mine.slice(-SHOWN_CALLS)
@@ -709,15 +745,41 @@ export const register: Register = on => {
         {main}
         <Text> </Text>
         <Text bold>
-          {rows.length === 0
+          {seats.length === 0
             ? 'Subagents · none yet'
-            : `Subagents · ${rows.length} total · ${running} active`}
+            : `Subagents · ${seats.length} total · ${running} active`}
         </Text>
         {blocks}
         {blocks.length < rows.length && (
           <Text dimColor>
             {'  '}… {rows.length - blocks.length} older {rows.length - blocks.length === 1 ? 'agent' : 'agents'} not shown
           </Text>
+        )}
+        {ended.length > 0 && (
+          <Box flexDirection="column">
+            <Text> </Text>
+            <Text bold wrap="truncate-end">
+              History · {shownEnded} of {ended.length} finished · {tokens(fullInput(everyone) + everyone.output)} tok
+              {everyone.cost > 0 ? ` · est. ${money(everyone.cost)}${everyone.unpriced > 0 ? '+' : ''}` : ''}
+            </Text>
+            {ended.slice(0, shownEnded).map(s => {
+              const spentBy = spent.find(x => x.agentId === s.id)
+              const what = s.label !== '' && s.label !== s.type ? ` · ${s.label}` : ''
+              return (
+                <Box key={s.id}>
+                  <Box flexShrink={0}>
+                    <Text color={COLOR[s.status]}>{ICON[s.status] ?? '·'} {kindIcon(s.type, s.name)} </Text>
+                  </Box>
+                  <Text dimColor wrap="truncate-end">
+                    {s.name !== '' ? s.name : s.type} · {tokens(spentBy === undefined ? 0 : fullInput(spentBy) + spentBy.output)} tok
+                    {spentBy !== undefined && spentBy.cost > 0 ? ` · est. ${money(spentBy.cost)}${spentBy.unpriced > 0 ? '+' : ''}` : ''} ·{' '}
+                    {log.filter(c => c.agentId === s.id).length} tools · {span(s.endedAt - s.firstSeen)}
+                    {what}
+                  </Text>
+                </Box>
+              )
+            })}
+          </Box>
         )}
         <Text> </Text>
         <Text dimColor wrap="truncate-end">

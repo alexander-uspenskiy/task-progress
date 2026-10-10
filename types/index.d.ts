@@ -6,6 +6,9 @@ export type AgentRow = {
   type: string
   status: string
 }
+// Every subagent seen this session, kept after the engine's own list drops it.
+// endedAt is 0 while it is still going.
+export type Seat = AgentRow & { firstSeen: number; endedAt: number }
 export type Call = {
   id: string
   agentId: string
@@ -53,6 +56,7 @@ declare module 'claude-code' {
       calls: Call[]
       usage4: Usage[]
       setups: Setup[]
+      roster1: Seat[]
       turn4: Tok
       prices1: Prices | null
       seen2: Seen[]

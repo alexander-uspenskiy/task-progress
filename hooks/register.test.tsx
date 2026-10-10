@@ -390,3 +390,52 @@ test('each agent type gets its own small icon next to its status', async ($, on)
   expect(await short.find({ type: 'Text', text: /older agents? not shown/ })).toBeDefined()
   await short.unmount()
 })
+
+test('a finished subagent moves into the history with the tokens it spent', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  mock.store(on)
+  on('http.fetch', () => ({ value: { status: 503, ok: false, headers: {}, text: '' } }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('turn.step', async function* (_$, e) {
+    const usage = e.agentId
+      ? { model: 'claude-unlisted-9', input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 100000, cache_creation_input_tokens: 0 }
+      : null
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
+  })
+  let listed: unknown[] = [{ id: 'h1000000aaaa', description: 'find hooks', type: 'Explore', status: 'running' }]
+  on('agent.list', () => ({ value: listed }) as never)
+
+  await $.prompt.submit({ text: 'go' } as never)
+  await clock.advance(500)
+  for await (const _chunk of $.turn.step({
+    turnId: 't1',
+    index: 0,
+    model: 'claude-unlisted-9',
+    messageCount: 1,
+    agentId: 'h1000000aaaa',
+  } as never)) {
+    // drain
+  }
+
+  // still running: it is an active card and there is no history yet
+  const running = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 60 } } as never)
+  expect(await running.find({ type: 'Text', text: /Explore \(find hooks\)/ })).toBeDefined()
+  expect(await running.find({ type: 'Text', text: /History/ })).toBeUndefined()
+  await running.unmount()
+
+  // it leaves the agent list, so it counts as finished and moves into the history
+  listed = []
+  await clock.advance(5000)
+
+  const done = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 80 } } as never)
+  expect(await done.find({ type: 'Text', text: /^History · 1 of 1 finished · 101\.5k tok$/ })).toBeDefined()
+  expect(await done.find({ type: 'Text', text: /Explore · 101\.5k tok · 0 tools · \d+s · find hooks/ })).toBeDefined()
+  expect(await done.find({ type: 'Text', text: /● 🔍/ })).toBeDefined()
+  expect(await done.find({ type: 'Text', text: /Explore \(find hooks\)/ })).toBeUndefined()
+  await done.unmount()
+})
