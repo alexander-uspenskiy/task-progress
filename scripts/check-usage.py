@@ -19,6 +19,17 @@ is counted once even when the transcript splits it over several lines.
 """
 import glob, json, os, re, sys, urllib.request
 
+UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+def count(value):
+    """A token count from the transcript: a non-negative int, 0 for anything else."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+def clean(value):
+    """Transcript text is untrusted: drop C0/C1 control characters (ESC included) before printing."""
+    return CONTROL.sub("", str(value))
+
 PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
 
 def load_prices():
@@ -29,22 +40,29 @@ def load_prices():
     except Exception:
         return {}
     rows = {}
-    num = lambda c: float(re.search(r"\$([\d.]+)", c).group(1)) if re.search(r"\$([\d.]+)", c) else None
+    def num(c):
+        try:
+            return float(re.search(r"\$([\d.]+)", c).group(1))
+        except (AttributeError, ValueError):
+            return None
     for ln in md.splitlines():
         if not ln.startswith("| Claude"):
             continue
         c = [x.strip() for x in ln.strip().strip("|").split("|")]
         if len(c) < 6:
             continue
-        label = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", c[0])
-        name = re.sub(r"\([^)]*\)", "", label).strip().lower()
-        name = re.sub(r"^claude\s+", "", name)
-        p = [num(x) for x in c[1:6]]
-        if None in p:
-            continue
-        over = re.search(r"over ([\d,]+) tokens", label)
-        rows.setdefault("claude-" + re.sub(r"[\s.]+", "-", name), []).append(
-            {"in": p[0], "w5": p[1], "cr": p[3], "out": p[4], "over": int(over.group(1).replace(",", "")) if over else None})
+        try:
+            label = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", c[0])
+            name = re.sub(r"\([^)]*\)", "", label).strip().lower()
+            name = re.sub(r"^claude\s+", "", name)
+            p = [num(x) for x in c[1:6]]
+            if None in p:
+                continue
+            over = re.search(r"over ([\d,]+) tokens", label)
+            row = {"in": p[0], "w5": p[1], "cr": p[3], "out": p[4], "over": int(over.group(1).replace(",", "")) if over else None}
+        except (AttributeError, ValueError, IndexError):
+            continue  # a malformed price row is skipped
+        rows.setdefault("claude-" + re.sub(r"[\s.]+", "-", name), []).append(row)
     return rows
 
 def cost(prices, model, fresh, read, write, out):
@@ -60,6 +78,9 @@ def cost(prices, model, fresh, read, write, out):
 def transcripts(session):
     base = os.path.expanduser("~/.claude/projects")
     if session:
+        if not UUID.fullmatch(session):
+            sys.stderr.write("check-usage: session id must be a UUID like 123e4567-e89b-12d3-a456-426614174000\n")
+            sys.exit(2)
         return sorted(glob.glob(f"{base}/*/{session}.jsonl"))
     proj = "-" + os.getcwd().strip("/").replace("/", "-").replace("_", "-")
     found = sorted(glob.glob(f"{base}/{proj}/*.jsonl"), key=os.path.getmtime)
@@ -86,7 +107,7 @@ def main():
     rows = []
     for f in files:
         rows += load(f)
-    rows.sort(key=lambda r: r.get("timestamp", ""))
+    rows.sort(key=lambda r: str(r.get("timestamp", "")))
 
     prices = load_prices()
     turns, cur, seen = [], None, set()
@@ -103,20 +124,20 @@ def main():
             if text.strip() and not is_result and not text.startswith("<"):
                 if cur is not None and cur["req"] == 0:
                     turns.pop()  # a prompt with an image arrives as two user lines
-                cur = {"p": text.strip().replace("\n", " ")[:44], "t": r.get("timestamp", "")[11:19],
+                cur = {"p": clean(text.strip().replace("\n", " "))[:44], "t": clean(str(r.get("timestamp", ""))[11:19]),
                        "in": 0, "out": 0, "cr": 0, "cw": 0, "req": 0, "usd": 0.0, "unpriced": 0}
                 turns.append(cur)
         elif r.get("type") == "assistant" and cur is not None and not r.get("isSidechain"):
             u, mid = msg.get("usage"), msg.get("id")
-            if u and mid and mid not in seen:
+            if isinstance(u, dict) and mid and mid not in seen:
                 seen.add(mid)
-                cur["in"] += u.get("input_tokens", 0)
-                cur["out"] += u.get("output_tokens", 0)
-                cur["cr"] += u.get("cache_read_input_tokens", 0)
-                cur["cw"] += u.get("cache_creation_input_tokens", 0)
+                cur["in"] += count(u.get("input_tokens"))
+                cur["out"] += count(u.get("output_tokens"))
+                cur["cr"] += count(u.get("cache_read_input_tokens"))
+                cur["cw"] += count(u.get("cache_creation_input_tokens"))
                 cur["req"] += 1
-                usd = cost(prices, msg.get("model"), u.get("input_tokens", 0), u.get("cache_read_input_tokens", 0),
-                           u.get("cache_creation_input_tokens", 0), u.get("output_tokens", 0))
+                usd = cost(prices, msg.get("model"), count(u.get("input_tokens")), count(u.get("cache_read_input_tokens")),
+                           count(u.get("cache_creation_input_tokens")), count(u.get("output_tokens")))
                 if usd is None:
                     cur["unpriced"] += 1
                 else:
@@ -129,10 +150,10 @@ def main():
                 ids = set()
                 for r in load(sf):
                     msg, u = r.get("message") or {}, (r.get("message") or {}).get("usage")
-                    if r.get("type") == "assistant" and u and msg.get("id") not in ids:
+                    if r.get("type") == "assistant" and isinstance(u, dict) and msg.get("id") not in ids:
                         ids.add(msg.get("id"))
-                        sub["in"] += u.get("input_tokens", 0); sub["out"] += u.get("output_tokens", 0)
-                        sub["cr"] += u.get("cache_read_input_tokens", 0); sub["cw"] += u.get("cache_creation_input_tokens", 0)
+                        sub["in"] += count(u.get("input_tokens")); sub["out"] += count(u.get("output_tokens"))
+                        sub["cr"] += count(u.get("cache_read_input_tokens")); sub["cw"] += count(u.get("cache_creation_input_tokens"))
 
     print(f"{'time':8} {'req':>3}  {'in':>7} {'(cached)':>9} {'out':>7}  {'(fresh)':>8} {'est. $':>8}  prompt")
     tot = {"in": 0, "out": 0, "cr": 0, "cw": 0}
