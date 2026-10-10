@@ -444,6 +444,9 @@ test('a finished subagent moves into the history with the tokens it spent', asyn
   expect(await done.find({ type: 'Text', text: /^History · 1 of 1 finished · 101\.5k tok$/ })).toBeDefined()
   expect(await done.find({ type: 'Text', text: /Explore · 101\.5k tok · 0 tools · \d+s · find hooks/ })).toBeDefined()
   expect(await done.find({ type: 'Text', text: /● 🔍/ })).toBeDefined()
+  // a completed agent's marker is gray in the history, not green
+  const marker = await done.find({ type: 'Text', text: /^● 🔍\s*$/ })
+  expect(marker?.props?.color).toBe('inactive')
   expect(await done.find({ type: 'Text', text: /Explore \(find hooks\)/ })).toBeUndefined()
   await done.unmount()
 })

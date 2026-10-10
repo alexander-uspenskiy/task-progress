@@ -193,6 +193,9 @@ const setupKids = (Text: any, model: string, effort: string): unknown[] => [
 const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
 
 const HISTORY_SHOWN = 6
+// In the history a finished agent is no longer news: its marker goes gray (a
+// failed one stays red).
+const HISTORY_DONE_COLOR = 'inactive'
 // 5s, 1m05s
 const span = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -794,7 +797,9 @@ export const register: Register = on => {
               return (
                 <Box key={s.id}>
                   <Box flexShrink={0}>
-                    <Text color={COLOR[s.status]}>{ICON[s.status] ?? '·'} {kindIcon(s.type, s.name)} </Text>
+                    <Text color={s.status === 'completed' ? HISTORY_DONE_COLOR : COLOR[s.status]}>
+                      {ICON[s.status] ?? '·'} {kindIcon(s.type, s.name)}{' '}
+                    </Text>
                   </Box>
                   <Text dimColor wrap="truncate-end">
                     {s.name !== '' ? s.name : s.type} · {tokens(spentBy === undefined ? 0 : fullInput(spentBy) + spentBy.output)} tok
