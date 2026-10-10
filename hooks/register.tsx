@@ -48,12 +48,14 @@ const NONE: Tok = { input: 0, output: 0, cached: 0, written: 0, cost: 0, unprice
 // earlier builds are not carried over):
 //   turn    everything since the last prompt, all agents
 //   agents  per agent, for the whole session; the session total is their sum
+//           plus `retired`, what agents dropped from the list (the cap) had spent
 //   seen    what each turn's own requests have already added, so a turn's
 //           closing report only adds what they missed
 const ledger = atom({ plugin: 'task-progress', key: 'ledger1' } as const, {
   turn: NONE,
   agents: [],
   seen: [],
+  retired: NONE,
 })
 // List prices, fetched from Anthropic's pricing page and refreshed daily. Absent
 // until a fetch has worked: with no price for a model no cost is shown for it.
@@ -189,10 +191,14 @@ const tally = (l: Ledger, agentId: string, b: Tok, turnId?: string): Ledger => {
             written: (had?.written ?? 0) + b.written,
           },
         ].slice(-KEEP_SEEN)
+  const agents = prune([...l.agents.filter(x => x.agentId !== agentId), sum])
+  // an agent dropped by the cap keeps counting in the session total
+  const dropped = [...l.agents.filter(x => x.agentId !== agentId), sum].filter(x => !agents.includes(x))
   return {
     turn: addTok(l.turn, b),
-    agents: prune([...l.agents.filter(x => x.agentId !== agentId), sum]),
+    agents,
     seen,
+    retired: dropped.length === 0 ? l.retired : addTok(l.retired, sumUsage(dropped)),
   }
 }
 const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
@@ -467,7 +473,7 @@ async function reconcile($: EngineInterface, turnId: string, agentId: string, u:
 async function reset($: EngineInterface) {
   await update($, todos, () => [])
   await update($, calls, () => [])
-  await update($, ledger, () => ({ turn: NONE, agents: [], seen: [] }))
+  await update($, ledger, () => ({ turn: NONE, agents: [], seen: [], retired: NONE }))
   await update($, roster, () => [])
   await update($, setups, () => [])
   await update($, agents, () => [])
@@ -552,14 +558,21 @@ export const register: Register = on => {
 
   // After a /clear the engine fires session.end (reason 'clear') and no
   // session.start, so this is what clears the old figures.
+  // The session is over (a /clear too, which fires this and no session.start):
+  // stop the timers first, so nothing writes while the state is being cleared,
+  // then start from nothing.
   on('session.end', async ($, e, next) => {
+    tick?.cancel()
+    tick = undefined
+    pricing?.cancel()
+    pricing = undefined
     try {
       await reset($)
     } catch {
       // a failed reset must not hold up the session's end
     }
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'task-agents' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Agents' })
@@ -608,14 +621,6 @@ export const register: Register = on => {
     tick = mine
 
     return next({ ...e, context: [...(e.context ?? []), TASK_HINT] })
-  }).catch(($, e, next) => next(e))
-
-  on('session.end', async ($, e, next) => {
-    tick?.cancel()
-    tick = undefined
-    pricing?.cancel()
-    pricing = undefined
-    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
@@ -781,8 +786,8 @@ export const register: Register = on => {
       if (i < SEGMENTS - 1) bar.push(<Text key={`g${i}`}>{' '}</Text>)
     }
     const percent = `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
-    const { turn: thisTurn, agents: perAgent } = await read($, ledger)
-    const session = sumUsage(perAgent)
+    const { turn: thisTurn, agents: perAgent, retired } = await read($, ledger)
+    const session = addTok(sumUsage(perAgent), retired)
     const hasTokens = fullInput(session) + session.output > 0
 
     return (
@@ -814,11 +819,11 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const seats = await read($, roster)
     const log = await read($, calls)
-    const { turn: thisTurn, agents: spent } = await read($, ledger)
+    const { turn: thisTurn, agents: spent, retired } = await read($, ledger)
     const configs = await read($, setups)
     const dg = await read($, diag)
     const known = await read($, prices)
-    const session = sumUsage(spent)
+    const session = addTok(sumUsage(spent), retired)
     const room = Math.max(8, (e.viewport?.rows ?? 24) - 4)
     const SHOWN_CALLS = 4
 
@@ -903,7 +908,7 @@ export const register: Register = on => {
     const running = rows.length
     const ended = seats.filter(s => s.endedAt > 0).sort((a, b) => b.endedAt - a.endedAt)
     const shownEnded = Math.min(HISTORY_SHOWN, ended.length, Math.max(2, Math.floor(room / 4)))
-    const everyone = sumUsage(spent.filter(x => x.agentId !== MAIN))
+    const everyone = addTok(sumUsage(spent.filter(x => x.agentId !== MAIN)), retired)
 
     // Subagents: newest first; each takes a card of a few lines, until the
     // pane is full (the history keeps its lines first).

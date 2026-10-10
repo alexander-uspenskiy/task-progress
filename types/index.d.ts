@@ -41,8 +41,9 @@ export type Diag = { steps: number; withUsage: number; completes: number; error:
 export type Usage = { agentId: string } & Tok
 // Every token figure, kept in ONE atom and written by one update per model request so the
 // parts cannot disagree. turn: everything since the last prompt, all agents; agents: per
-// agent (the session total is their sum); seen: what each turn's own requests have counted.
-export type Ledger = { turn: Tok; agents: Usage[]; seen: Seen[] }
+// agent; retired: what agents pruned from that list had spent (the session total is
+// their sum plus retired); seen: what each turn's own requests have counted.
+export type Ledger = { turn: Tok; agents: Usage[]; seen: Seen[]; retired: Tok }
 // One finished turn of the main loop, kept in the store (not an atom) to size the estimate.
 export type Turn = { tools: number; seconds: number }
 export type Run = {

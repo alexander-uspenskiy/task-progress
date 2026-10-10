@@ -1,3 +1,6 @@
 # written by the engine on every load
 .claude-plugin/types/
 tsconfig.json
+
+# git worktrees made for parallel work
+.claude/worktrees/

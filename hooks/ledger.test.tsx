@@ -173,9 +173,11 @@ test('session.end with reason clear resets every figure; fetched prices stay', a
     '| Claude Sonnet 5.5 | $2 / MTok | $2.50 / MTok | $4 / MTok | $0.10 / MTok | $10 / MTok |',
     '| Claude Haiku 5.5 | $0.10 / MTok | $0.125 / MTok | $0.20 / MTok | $0.01 / MTok | $0.50 / MTok |',
   ].join('\n')
-  harness(on, { main: usageOf(1000, 500, 100000, 2000, 'claude-opus-5-5') }, [], PRICING)
+  const clock = harness(on, { main: usageOf(1000, 500, 100000, 2000, 'claude-opus-5-5') }, [], PRICING)
   on('tool.call', () => ({ result: { text: 'ok' } }))
   await $.prompt.submit({ text: 'go' } as never)
+  // the price fetch runs from a timer, off the hook: let it finish
+  await clock.settle()
   await step($, 'k')
   await $.tool.call({ tool: 'Bash', command: 'ls', tool_use_id: 'c1' } as never)
 
@@ -228,10 +230,10 @@ test('pruning keeps the main agent and caps the other agents, oldest first out',
 
   await clock.advance(500)
   const ui = await pane($)
-  // the turn total keeps every request; the session total is the sum of what is kept:
-  // the main agent and the 40 newest others
+  // the turn total keeps every request, and so does the session total: an agent
+  // dropped by the cap is folded into it, not forgotten (51 requests in all)
   expect(await sessionText(ui, /^\s*51 in · 51 out$/)).toBeDefined()
-  expect(await sessionText(ui, /^\s*41 in · 41 out$/)).toBeDefined()
+  expect(await sessionText(ui, /^\s*41 in · 41 out$/)).toBeUndefined()
   // the main agent is still there, the oldest agent has lost its figures and its setup
   expect(await sessionText(ui, /^\s*2 tok · 1 in · 1 out$/)).toBeDefined()
   expect(await sessionText(ui, /^\s*agent00 · running$/)).toBeDefined()
