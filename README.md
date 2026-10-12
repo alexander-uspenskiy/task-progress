@@ -101,6 +101,20 @@ claude plugin update task-progress@task-progress
 
 An update only sees a release when `version` in `.claude-plugin/plugin.json` changes. To try it without installing: `claude --plugin-dir /path/to/task-progress`.
 
+### From a local folder (the EPAM repository)
+
+Clone the repository, then add the folder itself as the marketplace. The path is the folder that holds `.claude-plugin/`, for example `C:/Projects/task-progress` on Windows or `~/projects/task-progress` elsewhere:
+
+```
+git clone https://git.epam.com/alexander_uspensky/task-progress.git C:/Projects/task-progress
+claude plugin marketplace add C:/Projects/task-progress
+claude plugin install task-progress@task-progress --scope user
+```
+
+Start a new `claude` session afterwards and check it with `claude plugin list`. A folder marketplace reads the files in that folder, so to update, run `git pull` there, make sure `version` in `.claude-plugin/plugin.json` went up, and run `claude plugin update task-progress@task-progress`.
+
+If the marketplace name `task-progress` is already taken by the GitHub one, remove it first (this also uninstalls the plugin): `claude plugin marketplace remove task-progress`.
+
 ## Using it
 
 - Send a prompt. The pane opens and the band appears above the prompt while the run is active. The band stays while listed tasks are still open, and hides when everything is done or a survey is showing.
