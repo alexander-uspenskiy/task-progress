@@ -395,9 +395,87 @@ const fullInput = (t: Tok) => t.input + t.cached + t.written
 // 12 cents -> $0.12; the `+` says some requests had no price and are left out.
 const money = (n: number) =>
   n < 0.01 ? '<$0.01' : n < 100 ? `$${n.toFixed(2)}` : `$${Math.round(n)}`
-const tokBase = (t: Tok) =>
-  `${tokens(fullInput(t))} in${t.cached > 0 ? ` (${tokens(t.cached)} cached)` : ''} · ${tokens(t.output)} out`
 const estText = (t: Tok) => `est. ${money(t.cost)}${t.unpriced > 0 ? '+' : ''}`
+
+// A line of the pane is a list of segments joined by ` · `. The pane's width is
+// the user's to change (they can drag the dock), so a line that does not fit is
+// broken between segments, never in the middle of a figure; `pack` does the
+// breaking and `w` is what a segment takes up on screen.
+type Seg = { w: number; lead: string; leadW: number; kids: unknown[] }
+const SEP = ' · '
+// Terminal cells of a string: emoji and CJK take two, everything else one.
+const cells = (text: string): number => {
+  let n = 0
+  for (const ch of text) {
+    const c = ch.codePointAt(0) ?? 0
+    const isWide =
+      c >= 0x1100 &&
+      (c <= 0x115f ||
+        (c >= 0x2e80 && c <= 0xa4cf) ||
+        (c >= 0xac00 && c <= 0xd7a3) ||
+        (c >= 0xf900 && c <= 0xfaff) ||
+        (c >= 0xfe30 && c <= 0xfe6f) ||
+        (c >= 0xff00 && c <= 0xff60) ||
+        (c >= 0xffe0 && c <= 0xffe6) ||
+        c >= 0x1f000)
+    n += isWide ? 2 : 1
+  }
+  return n
+}
+// `lead` is what goes before the segment when it does not start a line.
+const seg = (text: string, lead = SEP): Seg => ({
+  w: cells(text),
+  lead,
+  leadW: cells(lead),
+  kids: [text],
+})
+// A segment drawn as an element of its own (bold cost, coloured model).
+const segOf = (text: string, node: unknown, lead = SEP): Seg => ({ ...seg(text, lead), kids: [node] })
+// Fills lines greedily. `first` and `rest` are the columns already taken in
+// front of the first line and of the later ones (the indent); a segment wider
+// than a whole line gets a line of its own and is cut at the edge.
+const pack = (segs: Seg[], first: number, rest: number, width: number): Seg[][] => {
+  const lines: Seg[][] = []
+  let line: Seg[] = []
+  let used = first
+  for (const s of segs) {
+    const add = line.length === 0 ? s.w : s.leadW + s.w
+    if (line.length > 0 && used + add > width) {
+      lines.push(line)
+      line = [s]
+      used = rest + s.w
+    } else {
+      line.push(s)
+      used += add
+    }
+  }
+  if (line.length > 0) lines.push(line)
+  return lines
+}
+// Cuts a string to `max` cells, ending in an ellipsis when it had to.
+const fit = (text: string, max: number): string => {
+  if (cells(text) <= max) return text
+  let out = ''
+  let w = 0
+  for (const ch of text) {
+    const cw = cells(ch)
+    if (w + cw > max - 1) break
+    out += ch
+    w += cw
+  }
+  return `${out}…`
+}
+const joinSegs =(line: Seg[]): unknown[] =>
+  line.flatMap((s, i) => (i === 0 ? s.kids : [s.lead, ...s.kids]))
+
+// The pane's body width in cells; the engine reports it, but it is read as
+// untrusted and falls back to the width the pane asks for.
+const PANE_COLUMNS = 52
+const MIN_COLUMNS = 24
+const paneWidth = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 1
+    ? Math.min(400, Math.max(MIN_COLUMNS, Math.floor(v)))
+    : PANE_COLUMNS
 
 // Parts of a line that should stand out. The estimated cost is bold, and the
 // model and effort get a colour of their own (a theme key, so it follows the
@@ -405,18 +483,25 @@ const estText = (t: Tok) => `est. ${money(t.cost)}${t.unpriced > 0 ? '+' : ''}`
 // `Text` is the element the render hook resolved for its surface.
 const SETUP_COLOR = 'suggestion'
 // 299.7k in (299.6k cached) · 1.1k out · est. $0.42
-const tokKids = (Text: any, t: Tok): unknown[] => [
-  tokBase(t),
+const tokSegs = (Text: any, t: Tok): Seg[] => [
+  seg(`${tokens(fullInput(t))} in${t.cached > 0 ? ` (${tokens(t.cached)} cached)` : ''}`),
+  seg(`${tokens(t.output)} out`),
   ...(t.cost > 0
-    ? [' · ', <Text key="est" bold dimColor={false}>{estText(t)}</Text>]
+    ? [segOf(estText(t), <Text key="est" bold dimColor={false}>{estText(t)}</Text>)]
     : []),
 ]
+const tokKids = (Text: any, t: Tok): unknown[] => joinSegs(tokSegs(Text, t))
 // sonnet-5-5 · effort high
-const setupKids = (Text: any, model: string, effort: string): unknown[] => [
-  <Text key="model" color={SETUP_COLOR} dimColor={false}>{shortModel(model)}</Text>,
+const setupSegs = (Text: any, model: string, effort: string): Seg[] => [
+  segOf(shortModel(model), <Text key="model" color={SETUP_COLOR} dimColor={false}>{shortModel(model)}</Text>),
   ...(effort === ''
     ? []
-    : [' · ', <Text key="effort" color={SETUP_COLOR} dimColor={false}>{`effort ${clean(effort, 20)}`}</Text>]),
+    : [
+        segOf(
+          `effort ${clean(effort, 20)}`,
+          <Text key="effort" color={SETUP_COLOR} dimColor={false}>{`effort ${clean(effort, 20)}`}</Text>,
+        ),
+      ]),
 ]
 
 // claude-haiku-5-5-20260101 -> haiku-5-5. Only the characters of a model id are
@@ -1071,7 +1156,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'task-agents' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'Agents' })
+    await $.ui.open({ id: PANE, title: 'Agents', columns: PANE_COLUMNS })
     return { text: 'Agents pane opened.' }
   })
 
@@ -1110,7 +1195,7 @@ export const register: Register = on => {
         expectedSeconds: Math.max(15, expectedSeconds),
       }))
     }
-    void $.ui.open({ id: PANE, title: 'Agents' })
+    void $.ui.open({ id: PANE, title: 'Agents', columns: PANE_COLUMNS })
     // Finished subagents with no tokens counted are read from their transcripts.
     backfill?.cancel()
     backfill = $.clock.after(0, () => {
@@ -1382,83 +1467,131 @@ export const register: Register = on => {
     const known = await read($, prices)
     const session = addTok(sumUsage(spent), retired)
     const room = Math.max(8, (e.viewport?.rows ?? 24) - 4)
+    // The dock can be dragged to any width: every line below is laid out for
+    // the width it has now, and breaks between its parts instead of at the edge.
+    const width = paneWidth(e.props?.bodyColumns)
     const SHOWN_CALLS = 4
 
-    // Every line is one Text that truncates at the pane's edge, and a label
-    // that must stay whole sits in a Box that does not shrink, so a narrow
-    // pane cuts the detail and never wraps a name onto two lines.
-    const line = (key: string, label: string, detail: string, color?: string) => (
-      <Box key={key}>
-        <Box flexShrink={0}>
-          <Text bold color={color}>{label}</Text>
-        </Box>
-        <Text dimColor wrap="truncate-end">{detail}</Text>
-      </Box>
-    )
-    const callLines = (mine: Call[], shown: number) => {
+    // Lines of segments (already packed), one Text each; `indent` columns in front.
+    const draw = (key: string, lines: Seg[][], indent: number, style: { dim?: boolean; bold?: boolean } = {}, hang = indent) =>
+      lines.map((l, i) => (
+        <Text
+          key={`${key}${i}`}
+          {...(style.dim === false ? {} : { dimColor: true })}
+          {...(style.bold === true ? { bold: true } : {})}
+          wrap="truncate-end"
+        >
+          {' '.repeat(i === 0 ? indent : hang)}
+          {joinSegs(l)}
+        </Text>
+      ))
+    const plain = (key: string, segs: Seg[], indent: number, style: { dim?: boolean; bold?: boolean } = {}) =>
+      draw(key, pack(segs, indent, indent, width), indent, style)
+    // A line with a marker in front (agent icons): later lines hang under the text.
+    const marked = (key: string, marker: unknown, markerW: number, lines: Seg[][], style: { dim?: boolean; bold?: boolean; color?: string }) =>
+      lines.map((l, i) =>
+        i === 0 ? (
+          <Box key={`${key}${i}`}>
+            <Box flexShrink={0}>{marker}</Box>
+            <Text
+              {...(style.dim === true ? { dimColor: true } : {})}
+              {...(style.bold === true ? { bold: true } : {})}
+              wrap="truncate-end"
+            >
+              {joinSegs(l)}
+            </Text>
+          </Box>
+        ) : (
+          <Text
+            key={`${key}${i}`}
+            {...(style.dim === true ? { dimColor: true } : {})}
+            {...(style.bold === true ? { bold: true } : {})}
+            wrap="truncate-end"
+          >
+            {' '.repeat(markerW)}
+            {joinSegs(l)}
+          </Text>
+        ),
+      )
+
+    // A tool call: the hint is cut to what is left of the line, so the time
+    // stays visible however narrow the pane is.
+    const callLines = (mine: Call[], shown: number): unknown[] => {
       const recent = mine.slice(-shown)
-      return (
-        <Box flexDirection="column">
-          {mine.length > recent.length && (
-            <Text dimColor>{'    '}… {mine.length - recent.length} earlier</Text>
-          )}
-          {recent.map(c => (
-            <Box key={c.id}>
-              <Box flexShrink={0}>
-                <Text color={c.status === 'error' ? 'error' : c.status === 'done' ? 'success' : 'claude'}>
-                  {'    '}
-                  {c.status === 'error' ? '✗' : c.status === 'done' ? '✓' : '◐'} {c.tool}
-                </Text>
-              </Box>
-              <Text dimColor wrap="truncate-end">
-                {c.hint === '' ? '' : ` ${c.hint}`} ·{' '}
-                {c.status === 'running' ? 'running' : seconds(c.ms)}
+      const out: unknown[] = []
+      if (mine.length > recent.length) {
+        out.push(
+          <Text key="earlier" dimColor>{'    '}… {mine.length - recent.length} earlier</Text>,
+        )
+      }
+      for (const c of recent) {
+        const mark = c.status === 'error' ? '✗' : c.status === 'done' ? '✓' : '◐'
+        const tail = ` · ${c.status === 'running' ? 'running' : seconds(c.ms)}`
+        const spare = width - 4 - cells(`${mark} ${c.tool}`) - 1 - cells(tail)
+        const hint = c.hint === '' || spare < 4 ? '' : ` ${fit(c.hint, spare)}`
+        out.push(
+          <Box key={c.id}>
+            <Box flexShrink={0}>
+              <Text color={c.status === 'error' ? 'error' : c.status === 'done' ? 'success' : 'claude'}>
+                {'    '}
+                {mark} {c.tool}
               </Text>
             </Box>
-          ))}
-        </Box>
-      )
+            <Text dimColor wrap="truncate-end">
+              {hint}
+              {tail}
+            </Text>
+          </Box>,
+        )
+      }
+      return out
     }
-    const setupKids2 = (id: string): unknown[] => {
+    const setupOf = (id: string): Seg[] => {
       const setup = configs.find(x => x.agentId === id)
-      return setup === undefined ? [] : setupKids(Text, setup.model, setup.effort)
+      return setup === undefined ? [] : setupSegs(Text, setup.model, setup.effort)
     }
-    const costKids = (id: string): unknown[] => {
+    const costOf = (id: string): Seg[] => {
       const cost = spent.find(x => x.agentId === id)
       return cost === undefined
-        ? ['no tokens yet']
-        : [`${tokens(fullInput(cost) + cost.output)} tok · `, ...tokKids(Text, cost)]
+        ? [seg('no tokens yet')]
+        : [seg(`${tokens(fullInput(cost) + cost.output)} tok`), ...tokSegs(Text, cost)]
     }
 
     // Main agent: a card of its own at the top.
     const mainCalls = log.filter(c => c.agentId === MAIN)
     const tally = new Map<string, number>()
     for (const c of mainCalls) tally.set(c.tool, (tally.get(c.tool) ?? 0) + 1)
-    const tallyText = [...tally.entries()]
+    const tallySegs = [...tally.entries()]
       .sort((x, y) => y[1] - x[1])
-      .map(([tool, n]) => `${tool}×${n}`)
-      .join(' ')
+      .map(([tool, n], i) => seg(`${tool}×${n}`, i === 0 ? SEP : ' '))
     const failed = mainCalls.filter(c => c.status === 'error').length
     const mainShown = Math.min(SHOWN_CALLS + 1, Math.max(2, Math.floor(room / 3)))
-    const mainUsed =
-      4 + Math.min(mainCalls.length, mainShown) + (mainCalls.length > mainShown ? 1 : 0)
-    const main = (
-      <Box flexDirection="column">
-        <Box>
-          <Box flexShrink={0}>
-            <Text bold color="claude">{`▌ ${MAIN_ICON} Main agent`}</Text>
-          </Box>
-          <Text dimColor wrap="truncate-end">{'  '}{setupKids2(MAIN)}</Text>
+    const mainHead = `▌ ${MAIN_ICON} Main agent`
+    const mainSetup = setupOf(MAIN)
+    // The setup goes beside the title when its first part fits there, else below it.
+    const isBeside = mainSetup.length > 0 && cells(mainHead) + 2 + mainSetup[0]!.w <= width
+    const setupLines = pack(mainSetup, isBeside ? cells(mainHead) + 2 : 4, 4, width)
+    const mainLines = [
+      <Box key="head">
+        <Box flexShrink={0}>
+          <Text bold color="claude">{mainHead}</Text>
         </Box>
-        <Text dimColor wrap="truncate-end">{'    '}{costKids(MAIN)}</Text>
         <Text dimColor wrap="truncate-end">
-          {'    '}
-          {mainCalls.length} tools{failed > 0 ? ` (${failed} failed)` : ''}
-          {tallyText === '' ? '' : ` · ${tallyText}`}
+          {'  '}
+          {isBeside ? joinSegs(setupLines[0]!) : ''}
         </Text>
-        {callLines(mainCalls, mainShown)}
-      </Box>
-    )
+      </Box>,
+      ...draw('ms', isBeside ? setupLines.slice(1) : setupLines, 4),
+      ...plain('mc', costOf(MAIN), 4),
+      ...plain(
+        'mt',
+        [seg(`${mainCalls.length} tools${failed > 0 ? ` (${failed} failed)` : ''}`, ''), ...tallySegs],
+        4,
+      ),
+      ...callLines(mainCalls, mainShown),
+    ]
+    const mainUsed = mainLines.length + 1
+    const main = <Box flexDirection="column">{mainLines}</Box>
 
     // Still going: a card each. Ended: one line each in the history below.
     const rows = seats.filter(s => s.endedAt === 0)
@@ -1467,57 +1600,133 @@ export const register: Register = on => {
     const shownEnded = Math.min(HISTORY_SHOWN, ended.length, Math.max(2, Math.floor(room / 4)))
     const everyone = addTok(sumUsage(spent.filter(x => x.agentId !== MAIN)), retired)
 
+    const historyHead = pack(
+      [
+        seg('History', ''),
+        seg(`${shownEnded} of ${ended.length} finished`),
+        seg(`${tokens(fullInput(everyone) + everyone.output)} tok`),
+        ...(everyone.cost > 0 ? [segOf(estText(everyone), <Text key="est" bold>{estText(everyone)}</Text>)] : []),
+      ],
+      0,
+      2,
+      width,
+    )
+    const historyRows = ended.slice(0, shownEnded).map(s => {
+      const spentBy = spent.find(x => x.agentId === s.id)
+      const marker = `${ICON[s.status] ?? '·'} ${kindIcon(s.type, s.name)} `
+      const lines = pack(
+        [
+          seg(s.name !== '' ? s.name : s.type, ''),
+          ...setupOf(s.id),
+          seg(`${tokens(spentBy === undefined ? 0 : fullInput(spentBy) + spentBy.output)} tok`),
+          ...(spentBy !== undefined && spentBy.cost > 0
+            ? [segOf(estText(spentBy), <Text key="est" bold dimColor={false}>{estText(spentBy)}</Text>)]
+            : []),
+          seg(`${log.filter(c => c.agentId === s.id).length} tools`),
+          seg(span(s.endedAt - s.firstSeen)),
+          ...(s.label !== '' && s.label !== s.type ? [seg(s.label)] : []),
+        ],
+        cells(marker),
+        cells(marker),
+        width,
+      )
+      return {
+        n: lines.length,
+        node: (
+          <Box key={s.id} flexDirection="column">
+            {marked(
+              s.id,
+              <Text color={s.status === 'completed' ? HISTORY_DONE_COLOR : COLOR[s.status]}>{marker}</Text>,
+              cells(marker),
+              lines,
+              { dim: true },
+            )}
+          </Box>
+        ),
+      }
+    })
+    const historyUsed = ended.length > 0 ? 1 + historyHead.length + historyRows.reduce((n, r) => n + r.n, 0) : 0
+
+    const sessionLines = plain('ts', tokSegs(Text, session), 4, { dim: false })
+    const turnLines = plain('tt', tokSegs(Text, thisTurn), 4, { dim: false })
+
     // Subagents: newest first; each takes a card of a few lines, until the
     // pane is full (the history keeps its lines first).
     const blocks = []
-    let used = mainUsed + 5 + (ended.length > 0 ? 2 + shownEnded : 0)
+    let used = mainUsed + 5 + (sessionLines.length - 1) + (turnLines.length - 1) + historyUsed
     for (const a of [...rows].reverse()) {
       const mine = log.filter(c => c.agentId === a.id)
-      const recent = mine.slice(-SHOWN_CALLS)
-      const need = 3 + recent.length + (mine.length > recent.length ? 1 : 0)
-      if (used + need > room && blocks.length > 0) break
-      used += need
       const isOver = FINISHED.includes(a.status)
       const name = a.name !== '' ? a.name : a.type
-      const what = a.label !== '' && a.label !== a.type ? ` (${a.label})` : ''
+      const marker = `${ICON[a.status] ?? '·'} ${kindIcon(a.type, a.name)} `
+      const head = pack(
+        [seg(name, ''), ...(a.label !== '' && a.label !== a.type ? [seg(`(${a.label})`, ' ')] : [])],
+        cells(marker),
+        cells(marker),
+        width,
+      )
+      const lines = [
+        ...marked(
+          `${a.id}h`,
+          <Text color={COLOR[a.status]}>{marker}</Text>,
+          cells(marker),
+          head,
+          { bold: true, dim: isOver },
+        ),
+        ...plain(`${a.id}s`, [seg(a.id.slice(0, 8), ''), seg(a.status), ...setupOf(a.id)], 4),
+        ...plain(`${a.id}c`, [seg(`${mine.length} tools`, ''), ...costOf(a.id)], 4),
+        ...callLines(mine, SHOWN_CALLS),
+      ]
+      if (used + lines.length > room && blocks.length > 0) break
+      used += lines.length
       blocks.push(
         <Box key={a.id} flexDirection="column">
-          <Box>
-            <Box flexShrink={0}>
-              <Text color={COLOR[a.status]}>{ICON[a.status] ?? '·'} {kindIcon(a.type, a.name)} </Text>
-            </Box>
-            <Text bold dimColor={isOver} wrap="truncate-end">{name}{what}</Text>
-          </Box>
-          <Text dimColor wrap="truncate-end">
-            {'    '}
-            {a.id.slice(0, 8)} · {a.status}
-            {setupKids2(a.id).length === 0 ? '' : ' · '}
-            {setupKids2(a.id)}
-          </Text>
-          <Text dimColor wrap="truncate-end">
-            {'    '}
-            {mine.length} tools · {costKids(a.id)}
-          </Text>
-          {callLines(mine, SHOWN_CALLS)}
+          {lines}
         </Box>,
       )
     }
+
+    const footer = pack(
+      [
+        seg(`counted: ${dg.withUsage}/${dg.steps} requests`, ''),
+        seg(`(${dg.subSteps} from subagents)`, ' '),
+        seg(`${dg.completes} turns`),
+        seg(`${dg.transcripts} subagent transcripts`),
+        seg(known === null ? 'no prices' : `${known.rows.length} prices`),
+        ...(clean(dg.error, 120) === '' ? [] : [seg(`error: ${clean(dg.error, 120)}`)]),
+      ],
+      0,
+      2,
+      width,
+    )
 
     return (
       <Box flexDirection="column">
         <Text bold>Tokens</Text>
         <Text dimColor wrap="truncate-end">{'  '}session (all agents)</Text>
-        <Text wrap="truncate-end">{'    '}{tokKids(Text, session)}</Text>
+        {sessionLines}
         <Text dimColor wrap="truncate-end">{'  '}this turn</Text>
-        <Text wrap="truncate-end">{'    '}{tokKids(Text, thisTurn)}</Text>
+        {turnLines}
         <Text> </Text>
         {main}
         <Text> </Text>
-        <Text bold>
-          {seats.length === 0
-            ? 'Subagents · none yet'
-            : `Subagents · ${seats.length} total · ${running} active`}
-        </Text>
+        {draw(
+          'sh',
+          pack(
+            [
+              seg('Subagents', ''),
+              ...(seats.length === 0
+                ? [seg('none yet')]
+                : [seg(`${seats.length} total`), seg(`${running} active`)]),
+            ],
+            0,
+            2,
+            width,
+          ),
+          0,
+          { dim: false, bold: true },
+          2,
+        )}
         {blocks}
         {blocks.length < rows.length && (
           <Text dimColor>
@@ -1527,47 +1736,12 @@ export const register: Register = on => {
         {ended.length > 0 && (
           <Box flexDirection="column">
             <Text> </Text>
-            <Text bold wrap="truncate-end">
-              History · {shownEnded} of {ended.length} finished · {tokens(fullInput(everyone) + everyone.output)} tok
-              {everyone.cost > 0 ? ' · ' : ''}
-              {everyone.cost > 0 ? <Text bold>{estText(everyone)}</Text> : ''}
-            </Text>
-            {ended.slice(0, shownEnded).map(s => {
-              const spentBy = spent.find(x => x.agentId === s.id)
-              const what = s.label !== '' && s.label !== s.type ? ` · ${s.label}` : ''
-              return (
-                <Box key={s.id}>
-                  <Box flexShrink={0}>
-                    <Text color={s.status === 'completed' ? HISTORY_DONE_COLOR : COLOR[s.status]}>
-                      {ICON[s.status] ?? '·'} {kindIcon(s.type, s.name)}{' '}
-                    </Text>
-                  </Box>
-                  <Text dimColor wrap="truncate-end">
-                    {s.name !== '' ? s.name : s.type}
-                    {setupKids2(s.id).length === 0 ? '' : ' · '}
-                    {setupKids2(s.id)} · {tokens(spentBy === undefined ? 0 : fullInput(spentBy) + spentBy.output)} tok
-                    {spentBy !== undefined && spentBy.cost > 0 ? ' · ' : ''}
-                    {spentBy !== undefined && spentBy.cost > 0 ? (
-                      <Text bold dimColor={false}>{estText(spentBy)}</Text>
-                    ) : (
-                      ''
-                    )}{' '}
-                    ·{' '}
-                    {log.filter(c => c.agentId === s.id).length} tools · {span(s.endedAt - s.firstSeen)}
-                    {what}
-                  </Text>
-                </Box>
-              )
-            })}
+            {draw('hh', historyHead, 0, { dim: false, bold: true }, 2)}
+            {historyRows.map(r => r.node)}
           </Box>
         )}
         <Text> </Text>
-        <Text dimColor wrap="truncate-end">
-          counted: {dg.withUsage}/{dg.steps} requests ({dg.subSteps} from subagents) · {dg.completes} turns ·{' '}
-          {dg.transcripts} subagent transcripts ·{' '}
-          {known === null ? 'no prices' : `${known.rows.length} prices`}
-          {clean(dg.error, 120) === '' ? '' : ` · error: ${clean(dg.error, 120)}`}
-        </Text>
+        {draw('ft', footer, 0, {}, 2)}
       </Box>
     )
   })
