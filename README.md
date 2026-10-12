@@ -148,7 +148,7 @@ If the marketplace name `task-progress` is already taken by the GitHub one, remo
 - Status markers: `○` pending, `◐` running, `◔` waiting, `◌` idle, `●` completed, `✗` failed or killed.
 - `/clear` ends the session for the mod and resets every figure; saved prices are kept.
 
-Agent kind icons come from `ICON_RULES`, tested top to bottom against the lowercased `<type> <name>`; the first match wins.
+Agent kind icons come from `ICON_RULES`, tested top to bottom against the lowercased `<type> <name>`; the first match wins. Entries are substrings, so `coordinat` also matches "coordinator" and `secur` matches "security-reviewer".
 
 | Text matches | Icon | Text matches | Icon |
 |---|---|---|---|
