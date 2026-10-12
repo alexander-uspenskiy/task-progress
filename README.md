@@ -186,7 +186,3 @@ claude plugin test .
 - `hooks/*.test.tsx`: tests (band and estimate, pane, icons, history, ledger and restore, subagent transcripts, price parsing and hostile pages, redaction, timers and `/clear`).
 - `types/index.d.ts`: the state contract (`PluginState['task-progress']`).
 - `.claude-plugin/plugin.json` and `marketplace.json`: manifest and marketplace entry. `.claude-plugin/types/` is written by the engine on every load and is git-ignored.
-
-## License
-
-MIT. See the `LICENSE` file.
