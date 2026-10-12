@@ -101,6 +101,30 @@ claude plugin update task-progress@task-progress
 
 An update only sees a release when `version` in `.claude-plugin/plugin.json` changes. To try it without installing: `claude --plugin-dir /path/to/task-progress`.
 
+### Directly from the EPAM repository (no clone)
+
+Claude Code can use a git URL as the marketplace, so there is nothing to clone by hand. The repository is private, so git must already be able to sign in to `git.epam.com` (a token with `read_repository` scope, stored by Git Credential Manager). Check that first; it asks for your credentials once if needed:
+
+```
+git ls-remote https://git.epam.com/alexander_uspensky/task-progress.git
+```
+
+Then add the repository as a marketplace and install the plugin:
+
+```
+claude plugin marketplace add https://git.epam.com/alexander_uspensky/task-progress.git
+claude plugin install task-progress@task-progress --scope user
+```
+
+Start a new `claude` session and check it with `claude plugin list` (it should show `task-progress@task-progress`, scope user, enabled). To update, refresh the marketplace and update the plugin; a new release is only seen when `version` in `.claude-plugin/plugin.json` went up:
+
+```
+claude plugin marketplace update task-progress
+claude plugin update task-progress@task-progress
+```
+
+The marketplace name is `task-progress` whichever way it was added, so if one is already registered (the GitHub one above, or a local folder), remove it first. This also uninstalls the plugin: `claude plugin marketplace remove task-progress`. The GitHub copy is not kept in step with the EPAM repository and may be behind.
+
 ### From a local folder (the EPAM repository)
 
 Clone the repository, then add the folder itself as the marketplace. The path is the folder that holds `.claude-plugin/`, for example `C:/Projects/task-progress` on Windows or `~/projects/task-progress` elsewhere:
