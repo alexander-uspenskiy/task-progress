@@ -149,7 +149,7 @@ There is no `userConfig`. Change behavior by editing constants in `hooks/registe
 | `HISTORY_DONE_COLOR`, `HISTORY_SHOWN` | Color of finished markers in History; how many history lines are shown (6). |
 | `ICON_RULES`, `MAIN_ICON`, `OTHER_ICON`, `ICON` | Agent kind icons, the main and fallback icons, status markers. |
 | `TICK_MS` | Poll interval of the band and pane data (400 ms). |
-| `PANE_COLUMNS`, `MIN_COLUMNS` | Width the docked pane asks for (52), and the narrowest width the layout plans for (24). |
+| `PANE_COLUMNS`, `MIN_COLUMNS` | Width the docked pane asks for (34), and the narrowest width the layout plans for (24). |
 | `TASK_HINT` | The reminder added to each prompt. Edit the text, or remove the `context` line at the end of the `prompt.submit` hook to stop adding it. |
 | `PRICING_URL`, `FETCH_TIMEOUT_MS` | Where prices come from and how long the fetch may take. |
 | `KEEP_AGENTS`, `KEEP_SAVED` | How many agents are kept in the ledger, and how many sessions' ledgers are kept in the store. |
@@ -165,7 +165,7 @@ Keep icons single code point emoji, as the file comment says, so they keep their
 - A fixed reminder is added to every prompt, which is a visible behavior change in what the model sees.
 - Tokens are counted per request and reconciled with the turn's closing report; an aborted turn adds nothing from that report.
 - The pane lays itself out for the width it has: a line that does not fit is broken between its parts (` · `), a label that does not fit beside an agent's name moves under it, and a call's hint is cut so its duration stays visible. A single part wider than the whole pane (a very long agent name) is still cut at the edge; hints are shortened to 36 characters.
-- The docked pane asks for `PANE_COLUMNS` (52) columns. That is a request: a width you drag the dock to wins and is remembered, and the inline pane (terminals under 110 columns, or not fullscreen) always spans the terminal.
+- The docked pane asks for `PANE_COLUMNS` (34) columns. That is a request: a width you drag the dock to wins and is remembered, and the inline pane (terminals under 110 columns, or not fullscreen) always spans the terminal.
 - Terminal and desktop: the pane and band are drawn by the Claude Code UI; the desktop Code tab loads user-scope plugins but lacks the install command.
 - Emoji width depends on the terminal font. Single code point emoji were chosen to keep alignment, but some terminals still draw them wide or narrow.
 

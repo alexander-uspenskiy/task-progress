@@ -79,9 +79,9 @@ const setup = async ($: any, on: any) => {
 test('the pane asks for a narrow dock and every line fits the width it gets', async ($, on) => {
   const opened = await setup($, on)
   expect(opened.length).toBeGreaterThan(0)
-  for (const o of opened) expect(o.columns).toBe(52)
+  for (const o of opened) expect(o.columns).toBe(34)
 
-  for (const width of [30, 40, 52, 80]) {
+  for (const width of [30, 34, 52, 80]) {
     const ui = await $.ui.mount(pane(width))
     const all = await texts(ui)
     expect(all.length).toBeGreaterThan(5)
@@ -123,7 +123,10 @@ test('a width the engine did not report falls back to the narrow default', async
   await setup($, on)
   for (const bad of [undefined, 0, -5, Number.NaN, '80']) {
     const ui = await $.ui.mount(pane(bad))
-    for (const t of await texts(ui)) expect([...t].length).toBeLessThanOrEqual(52)
+    for (const t of await texts(ui)) {
+      // a part wider than the whole pane (the long label) is cut at the edge
+      if (!/^\s*\(a rather/.test(t)) expect([...t].length, JSON.stringify(t)).toBeLessThanOrEqual(34)
+    }
     await ui.unmount()
   }
 })

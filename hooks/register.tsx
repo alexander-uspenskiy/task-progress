@@ -465,12 +465,12 @@ const fit = (text: string, max: number): string => {
   }
   return `${out}…`
 }
-const joinSegs =(line: Seg[]): unknown[] =>
+const joinSegs = (line: Seg[]): unknown[] =>
   line.flatMap((s, i) => (i === 0 ? s.kids : [s.lead, ...s.kids]))
 
 // The pane's body width in cells; the engine reports it, but it is read as
 // untrusted and falls back to the width the pane asks for.
-const PANE_COLUMNS = 52
+const PANE_COLUMNS = 34
 const MIN_COLUMNS = 24
 const paneWidth = (v: unknown): number =>
   typeof v === 'number' && Number.isFinite(v) && v >= 1
