@@ -123,10 +123,13 @@ const FINISHED = ['completed', 'failed', 'killed']
 const ICON_RULES: [RegExp, string][] = [
   [/coordinat/, '🧭'], // coordinator
   [/orchestrat/, '🎼'], // orchestrator
+  [/browser|web/, '🌐'], // web search and browser control; before "search" so web-researcher lands here
   [/explor|search|find/, '🔍'], // searches the code
   [/plan|architect/, '🔬'], // architect
   [/design/, '📐'],
   [/review/, '🧐'],
+  [/commit/, '📦'], // committer
+  [/check|valid|lint/, '🚦'], // check-runner
   [/test|qa/, '🧪'],
   [/secur|audit/, '🔒'],
   [/research|guide|doc/, '📖'],

@@ -152,14 +152,16 @@ Agent kind icons come from `ICON_RULES`, tested top to bottom against the lowerc
 
 | Text matches | Icon | Text matches | Icon |
 |---|---|---|---|
-| coordinat | 🧭 | research, guide, doc | 📖 |
-| orchestrat | 🎼 | status, config, setup | 🔩 |
+| coordinat | 🧭 | secur, audit | 🔒 |
+| orchestrat | 🎼 | research, guide, doc | 📖 |
+| browser, web | 🌐 | status, config, setup | 🔩 |
 | explor, search, find | 🔍 | code, coder, engineer, develop, implement, build | 💻 |
 | plan, architect | 🔬 | general, worker | 👷 |
 | design | 📐 | teammate | 🤝 |
 | review | 🧐 | main agent | 🧠 |
-| test, qa | 🧪 | anything else | 🤖 |
-| secur, audit | 🔒 | | |
+| commit | 📦 | anything else | 🤖 |
+| check, valid, lint | 🚦 | | |
+| test, qa | 🧪 | | |
 
 ## Configuration
 

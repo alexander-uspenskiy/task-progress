@@ -382,6 +382,11 @@ test('each agent type gets its own small icon next to its status', async ($, on)
         { id: 'a6000000aaaa', description: 'unknown', type: 'mystery', status: 'waiting' },
         { id: 'a7000000aaaa', description: 'runs the team', type: 'coordinator', status: 'running' },
         { id: 'a8000000aaaa', description: 'splits the work', type: 'orchestrator', status: 'completed' },
+        { id: 'a9000000aaaa', description: 'looks things up', type: 'web-researcher', status: 'running' },
+        { id: 'aa000000aaaa', description: 'clicks through', type: 'browser-operator', status: 'completed' },
+        { id: 'ab000000aaaa', description: 'save work', type: 'committer', status: 'pending' },
+        { id: 'ac000000aaaa', description: 'run the suite', type: 'check-runner', status: 'failed' },
+        { id: 'ad000000aaaa', description: 'update readme', type: 'doc-sync', status: 'idle' },
       ],
     }) as never,
   )
@@ -389,8 +394,8 @@ test('each agent type gets its own small icon next to its status', async ($, on)
   await $.prompt.submit({ text: 'go' } as never)
   await clock.advance(500)
 
-  // a tall pane, so all eight cards fit
-  const pane = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 80 } } as never)
+  // a tall pane, so all thirteen cards fit
+  const pane = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 160 } } as never)
   expect(await pane.find({ type: 'Text', text: /◐ 🔍/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /● 👷/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /○ 🔬/ })).toBeDefined()
@@ -399,6 +404,11 @@ test('each agent type gets its own small icon next to its status', async ($, on)
   expect(await pane.find({ type: 'Text', text: /◔ 🤖/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /◐ 🧭/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /● 🎼/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◐ 🌐/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /● 🌐/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /○ 📦/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /✗ 🚦/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◌ 📖/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /▌ 🧠 Main agent/ })).toBeDefined()
   await pane.unmount()
 
