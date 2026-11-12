@@ -490,7 +490,7 @@ test('each agent type gets its own small icon next to its status', async ($, on)
   // a tall pane, so all thirteen cards fit
   const pane = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 160 } } as never)
   expect(await pane.find({ type: 'Text', text: /◐ ◈/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /● ▪/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /● ◊/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /○ ◇/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /✗ ◉/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /◌ ❯/ })).toBeDefined()

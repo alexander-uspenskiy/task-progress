@@ -9,6 +9,9 @@ a row with the bar's `turn ... in · ... out · ... cached` line.
   python3 scripts/check-usage.py <session-id>    # a given session
   python3 scripts/check-usage.py --subagents     # also add subagent transcripts
 
+macOS and Linux: python3. Windows: `python scripts/check-usage.py ...` (there is no
+python3 command there; `py -3` works too).
+
 The est. $ column prices every request at Anthropic's list prices (the page the
 mod reads); with no price for a model, or no network, it is left out.
 
@@ -82,17 +85,23 @@ def transcripts(session):
             sys.stderr.write("check-usage: session id must be a UUID like 123e4567-e89b-12d3-a456-426614174000\n")
             sys.exit(2)
         return sorted(glob.glob(f"{base}/*/{session}.jsonl"))
-    proj = "-" + os.getcwd().strip("/").replace("/", "-").replace("_", "-")
+    # Claude Code names the project folder after the working directory with every
+    # character that is not a letter or digit turned into "-": /Users/me/my_app is
+    # -Users-me-my-app, C:\Projects\task-progress is C--Projects-task-progress.
+    proj = re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
     found = sorted(glob.glob(f"{base}/{proj}/*.jsonl"), key=os.path.getmtime)
     return found[-1:]
 
 def load(path):
     rows = []
-    for line in open(path):
-        try:
-            rows.append(json.loads(line))
-        except ValueError:
-            pass
+    # transcripts are UTF-8 whatever the platform's default encoding is (a Windows
+    # console reads them as cp1252 otherwise and stops on the first non-ASCII byte)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                pass
     return rows
 
 def k(n):
@@ -115,6 +124,9 @@ def largest_usage(rows):
     return best
 
 def main():
+    # prompts can hold any character; a legacy console encoding must not stop the report
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     with_sub = "--subagents" in sys.argv
     files = transcripts(args[0] if args else None)

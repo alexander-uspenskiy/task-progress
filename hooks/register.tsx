@@ -149,7 +149,7 @@ const ICON_RULES: [RegExp, string][] = [
   [/research|guide|doc/, '≡'],
   [/status|config|setup/, '◍'],
   [/code|coder|engineer|develop|implement|build/, '❯'], // engineer
-  [/general|worker/, '▪'], // general-purpose worker
+  [/general|worker/, '◊'], // general-purpose worker
   [/teammate/, '⊕'],
 ]
 const MAIN_ICON = '◆'
@@ -779,6 +779,7 @@ async function loadPrices($: EngineInterface) {
 // The one write of a model request's tokens (see `ledger`). With a turnId the
 // turn's own bookkeeping is updated in the same write.
 async function count($: EngineInterface, agentId: string, c: Counts, model: string, turnId?: string) {
+  await adopt($)
   const cost = costOf(await read($, prices), model, c)
   const bump: Tok = { ...c, cost: cost ?? 0, unpriced: cost === undefined ? 1 : 0 }
   await update($, ledger, l => tally(l, agentId, bump, turnId))
@@ -788,6 +789,7 @@ async function count($: EngineInterface, agentId: string, c: Counts, model: stri
 // requests did not count, and forget the turn's bookkeeping, in one write. With
 // no report (an aborted turn) there is nothing to add, but the entry still goes.
 async function reconcile($: EngineInterface, turnId: string, agentId: string, u: (Parameters<typeof bumpOf>[0] & { model: string }) | undefined) {
+  await adopt($)
   const list = u === undefined ? null : await read($, prices)
   await update($, ledger, old => {
     const l = norm(old)
@@ -853,6 +855,7 @@ const noteAttempt = (id: string, v: { n: number; at: number }) => {
 }
 async function saveLedger($: EngineInterface, force = false) {
   try {
+    await adopt($)
     const now = await $.clock.now()
     if (!force && now - savedAt < 2000) return
     const l = norm(await read($, ledger))
@@ -876,6 +879,24 @@ async function saveLedger($: EngineInterface, force = false) {
   } catch {
     // totals just stay in memory
   }
+}
+// The first thing any write to the ledger does (a request counted, a transcript
+// credited, a save): make sure this load of the mod has taken the saved copy back
+// first. A reload of the mod in the middle of a turn leaves the engine with an
+// empty ledger while the store still holds the totals up to the reload, and
+// session.start or the next prompt is too late for it: the first save after the
+// reload would overwrite the saved totals with only what was counted since.
+// Concurrent callers wait for the same restore; session.end forgets it.
+let adopting: { id: string; done: Promise<void> } | undefined
+async function adopt($: EngineInterface) {
+  let id: string
+  try {
+    id = String(await $.session.id())
+  } catch {
+    return
+  }
+  if (adopting === undefined || adopting.id !== id) adopting = { id, done: restoreLedger($) }
+  await adopting.done
 }
 // Back from the store when the in-memory ledger is empty (a reload cleared it).
 async function restoreLedger($: EngineInterface) {
@@ -960,6 +981,8 @@ async function creditTranscript($: EngineInterface, agentId: string, path: strin
   }
   try {
     if (typeof path !== 'string' || path.length === 0 || path.length > 4096) return 'failed'
+    // what is already counted for this agent decides what is added: start from the saved copy
+    await adopt($)
     // `$.fs.read` takes no offset or length, so a file over its limit cannot be read in
     // part: ask its size first (an answer that cannot be had leaves it to the read).
     try {
@@ -1163,7 +1186,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // a new session may save its ledger again
     endedId = undefined
-    await restoreLedger($)
+    adopting = undefined
+    await adopt($)
     // A reload keeps the roster: read the transcripts of subagents that finished
     // while no tokens were being counted for them.
     backfill?.cancel()
@@ -1219,6 +1243,7 @@ export const register: Register = on => {
       // the session is over: its saved totals go with it
       await $.store.delete(`${SAVED}${endedId}`)
       savedJson = ''
+      adopting = undefined
     } catch {
       // the saved copy stays; a new session has an id of its own
     }
@@ -1231,6 +1256,8 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await adopt($)
+    // a ledger lost some other way (nothing counted since) is restored here too
     await restoreLedger($)
     pricing?.cancel()
     pricing = $.clock.after(0, () => {

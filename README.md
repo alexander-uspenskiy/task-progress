@@ -80,7 +80,7 @@ All of it lives in `hooks/register.tsx`.
 - Engine state atoms (in memory): task list, agent list, the subagent roster (last 40), the tool-call log (last 400), model and effort per agent, the run clock, and the token ledger.
 - Plugin store (kept across reloads): `history` (tool count and seconds of your last 20 turns, used for the estimate), `prices` and `pricesTriedAt`, and `ledger:<session id>` (token counters of the 8 most recent sessions; the current one is deleted on `session.end`).
 
-**Tokens.** Counted per model request from `turn.step`, for the main agent and, when they reach the hooks, subagents. A turn's closing report fills in anything the requests missed. A subagent's tokens are read from its own transcript when it stops, and finished subagents with no tokens counted are backfilled from the session folder `~/.claude/projects/<project>/<session>/subagents/` at load, on each prompt, on each poll (a few tries, spaced out), and at the end of a turn. Only the difference from what was already counted is added. The ledger is saved to the store (at most every 2 s, and at the end of a turn or subagent) and restored if the in-memory copy is empty after a reload.
+**Tokens.** Counted per model request from `turn.step`, for the main agent and, when they reach the hooks, subagents. A turn's closing report fills in anything the requests missed. A subagent's tokens are read from its own transcript when it stops, and finished subagents with no tokens counted are backfilled from the session folder `~/.claude/projects/<project>/<session>/subagents/` at load, on each prompt, on each poll (a few tries, spaced out), and at the end of a turn. Only the difference from what was already counted is added. The ledger is saved to the store (at most every 2 s, and at the end of a turn or subagent) and restored if the in-memory copy is empty after a reload. The first write after a load of the mod (a request counted, a transcript credited, a save) takes the saved copy back first, so a reload of the mod in the middle of a turn no longer drops the session total to what was counted since.
 
 **Estimated cost.** On first use the mod fetches `platform.claude.com/docs/en/about-claude/pricing.md` (8 s timeout, run from a timer so it never holds up a prompt), parses the model table, keeps it in the store, and refreshes it when it is over a day old; a failed attempt is not retried within the hour. Each request is priced at its model's list rate, using the long-prompt rate when the page lists one and the prompt is over its limit. If a model has no price, or the fetch failed, that cost is left out; a `+` after the figure means some requests had no price.
 
@@ -160,7 +160,7 @@ Agent kind icons come from `ICON_RULES`, tested top to bottom against the lowerc
 | orchestrat | ❖ | research, guide, doc | ≡ |
 | browser, web | ⌘ | status, config, setup | ◍ |
 | explor, search, find | ◈ | code, coder, engineer, develop, implement, build | ❯ |
-| plan, architect | ◇ | general, worker | ▪ |
+| plan, architect | ◇ | general, worker | ◊ |
 | design | ▧ | teammate | ⊕ |
 | review | ◉ | main agent | ◆ |
 | commit | ▲ | anything else | ◦ |
@@ -217,6 +217,8 @@ python3 scripts/check-usage.py                # newest session of the current pr
 python3 scripts/check-usage.py <session-id>   # a given session
 python3 scripts/check-usage.py --subagents    # also add subagent transcripts
 ```
+
+On macOS and Linux run it with `python3`; on Windows there is no `python3` command, so use `python scripts/check-usage.py ...` (or `py -3`). It reads transcripts as UTF-8 on every platform and finds the project folder from the working directory on all three.
 
 It prints time, requests, in, cached, out, fresh input, estimated cost and the prompt text, then a session total. For the estimated cost it makes its own GET to the same pricing page; without network the cost column is left out.
 
