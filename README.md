@@ -77,11 +77,11 @@ All of it lives in `hooks/register.tsx`.
 **Where state lives.**
 
 - Engine state atoms (in memory): task list, agent list, the subagent roster (last 40), the tool-call log (last 400), model and effort per agent, the run clock, and the token ledger.
-- Plugin store (kept across reloads): `history` (tool count and seconds of your last 20 turns, used for the estimate), `prices` and `pricesTriedAt`, and `ledger:<session id>` (token counters of the sessions of the last 7 days, at most 50; the current one is deleted on `session.end`). The store keeps a 7 day window: at each prompt and at load, saved ledgers, the saved price list and the time of the last price fetch that are older than 7 days (or have no readable date) are deleted; the running session's own ledger is not touched. The turn `history` has no dates and is not part of the window.
+- Plugin store (kept across reloads): `history` (tool count and seconds of your last 20 turns, used for the estimate), `prices` and `pricesTriedAt`, and `ledger:<session id>` (token counters of the 8 most recent sessions; the current one is deleted on `session.end`).
 
 **Tokens.** Counted per model request from `turn.step`, for the main agent and, when they reach the hooks, subagents. A turn's closing report fills in anything the requests missed. A subagent's tokens are read from its own transcript when it stops, and finished subagents with no tokens counted are backfilled from the session folder `~/.claude/projects/<project>/<session>/subagents/` at load, on each prompt, on each poll (a few tries, spaced out), and at the end of a turn. Only the difference from what was already counted is added. The ledger is saved to the store (at most every 2 s, and at the end of a turn or subagent) and restored if the in-memory copy is empty after a reload.
 
-**Estimated cost.** On first use the mod fetches `platform.claude.com/docs/en/about-claude/pricing.md` (8 s timeout, run from a timer so it never holds up a prompt), parses the model table, keeps it in the store, and refreshes it when it is over a day old; a failed attempt is not retried within the hour. A price list older than 7 days is deleted, so a list that could not be refreshed for a week stops pricing anything (no cost is shown until a fetch works). Each request is priced at its model's list rate, using the long-prompt rate when the page lists one and the prompt is over its limit. If a model has no price, or the fetch failed, that cost is left out; a `+` after the figure means some requests had no price.
+**Estimated cost.** On first use the mod fetches `platform.claude.com/docs/en/about-claude/pricing.md` (8 s timeout, run from a timer so it never holds up a prompt), parses the model table, keeps it in the store, and refreshes it when it is over a day old; a failed attempt is not retried within the hour. Each request is priced at its model's list rate, using the long-prompt rate when the page lists one and the prompt is over its limit. If a model has no price, or the fetch failed, that cost is left out; a `+` after the figure means some requests had no price.
 
 **Subagent history.** A subagent is moved from its card into History when it completes, fails, is killed, or disappears from the engine's agent list. The last 6 are shown, newest first; the heading gives how many are shown and finished, the tokens of all subagents so far, and their estimated cost.
 
@@ -182,8 +182,7 @@ There is no `userConfig`. Change behavior by editing constants in `hooks/registe
 | `PANE_COLUMNS`, `MIN_COLUMNS` | Width the docked pane asks for (34), and the narrowest width the layout plans for (24). |
 | `TASK_HINT` | The reminder added to each prompt. Edit the text, or remove the `context` line at the end of the `prompt.submit` hook to stop adding it. |
 | `PRICING_URL`, `FETCH_TIMEOUT_MS` | Where prices come from and how long the fetch may take. |
-| `KEEP_DAYS` | The store's retention window in days (7): older saved ledgers, prices and price-fetch times are deleted. |
-| `KEEP_AGENTS`, `KEEP_SAVED` | How many agents are kept in the ledger, and the most saved ledgers the store may hold (50; the 7 day window is what normally limits them). |
+| `KEEP_AGENTS`, `KEEP_SAVED` | How many agents are kept in the ledger, and how many sessions' ledgers are kept in the store. |
 
 Icons are one-cell monochrome symbols from the Basic Multilingual Plane, so they keep their width; a few East Asian terminal fonts may still draw geometric shapes two cells wide.
 

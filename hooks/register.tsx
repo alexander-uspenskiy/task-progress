@@ -747,45 +747,15 @@ async function fetchPage($: EngineInterface) {
   }
 }
 
-// The plugin store keeps a 7 day window: anything older is deleted. That is the
-// saved ledgers of other sessions (by their `at`), the price list (by `fetchedAt`)
-// and the time of the last price fetch. The running session's own ledger stays,
-// whatever its age. An entry whose date cannot be read counts as old.
-const KEEP_DAYS = 7
-const KEEP_MS = KEEP_DAYS * DAY
-async function pruneStore($: EngineInterface, now: number) {
-  try {
-    const mine = `${SAVED}${await $.session.id()}`
-    for (const k of (await $.store.keys()) ?? []) {
-      if (typeof k !== 'string' || !k.startsWith(SAVED) || k === mine) continue
-      const v = await $.store.get(k)
-      const at = isObj(v) ? num(v.at, Number.MAX_SAFE_INTEGER) : 0
-      if (at === 0 || now - at > KEEP_MS) await $.store.delete(k)
-    }
-    const listed = cleanPrices(await $.store.get('prices'))
-    if (listed !== null && now - listed.fetchedAt > KEEP_MS) await $.store.delete('prices')
-    const tried = await $.store.get('pricesTriedAt')
-    if (typeof tried === 'number' && now - tried > KEEP_MS) await $.store.delete('pricesTriedAt')
-  } catch {
-    // an entry that stays one more day does no harm
-  }
-}
-
 // Load the saved prices, and fetch fresh ones when they are over a day old (a
-// failed fetch is not retried within the hour). Prices older than the 7 day
-// window are dropped, so a list that could not be refreshed for a week no longer
-// prices anything. Any failure leaves things as they were: prices simply stay
-// unknown, and no cost is shown.
+// failed fetch is not retried within the hour). Any failure leaves things as
+// they were: prices simply stay unknown, and no cost is shown.
 async function loadPrices($: EngineInterface) {
   try {
     const now = await $.clock.now()
-    await pruneStore($, now)
     const saved = cleanPrices(await $.store.get('prices'))
     if (saved !== null) {
       await update($, prices, () => saved)
-    } else {
-      const held = await read($, prices)
-      if (held !== null && now - held.fetchedAt > KEEP_MS) await update($, prices, () => null)
     }
     const triedAt = await $.store.get('pricesTriedAt')
     const tried = typeof triedAt === 'number' && Number.isFinite(triedAt) ? triedAt : 0
@@ -860,9 +830,7 @@ async function reset($: EngineInterface) {
 // the mod, a restart, or a state value the engine could not keep does not lose the
 // session's totals. Written at most every 2 s (and at the end of a turn).
 const SAVED = 'ledger:'
-// The window in days is what limits saved ledgers (`pruneStore`); this count is only
-// a guard against a store that fills up faster than a week.
-const KEEP_SAVED = 50
+const KEEP_SAVED = 8
 let savedJson = ''
 let savedAt = 0
 // The session id whose saved copy session.end has deleted: nothing is written under it

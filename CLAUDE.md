@@ -27,7 +27,7 @@ Almost everything is in `hooks/register.tsx` (state atoms and pure helpers at th
 
 **State has two layers.**
 - *Engine atoms* (in memory, via `atom`/`read`/`update`): `todos`, `calls` (last 400), `agents`, `roster1` (subagent seats, last 40), `setups` (model and effort per agent), `run`, `diag2`, `prices1`, and `ledger1`. Atom keys are versioned (`ledger1`, `roster1`, `prices1`, `diag2`); change the shape of one and bump its key (and the `types/index.d.ts` entry) so state from older builds is not carried over.
-- *Plugin store* (`$.store`, survives reloads): `history` (last 20 turns' tool count and seconds, used for the no-task-list estimate), `prices`, `pricesTriedAt`, and `ledger:<session id>` (sessions of the last 7 days, capped at 50; the current one is deleted on `session.end`). `pruneStore` (run from `loadPrices`, so at load and at each prompt, from a timer) deletes saved ledgers, `prices` and `pricesTriedAt` older than `KEEP_DAYS` (7); the running session's own ledger is exempt; `history` has no dates and is not pruned.
+- *Plugin store* (`$.store`, survives reloads): `history` (last 20 turns' tool count and seconds, used for the no-task-list estimate), `prices`, `pricesTriedAt`, and `ledger:<session id>` (8 most recent sessions; the current one is deleted on `session.end`).
 
 **The token ledger is one atom on purpose.** `ledger1` holds `turn`, per-`agents` totals, `retired` (agents pruned by the cap) and `seen` (what each turn's own requests already counted) so the parts can never disagree. Every write goes through `tally`, in a single `update`. Tokens reach it three ways, and each must add only the *difference* from what is already counted, never the full figure, to avoid double counting:
 1. `turn.step` (per model request, via `count`),
