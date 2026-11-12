@@ -4,3 +4,6 @@ tsconfig.json
 
 # git worktrees made for parallel work
 .claude/worktrees/
+
+# UX review, mock-ups, reports and screenshots: local working material, not part of the plugin
+docs/
