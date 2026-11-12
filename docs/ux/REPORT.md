@@ -72,3 +72,18 @@ Rules from `CLAUDE.md` still apply: new inputs go through `clean`/`num`, new col
 - `shots/dark-band.png`, `shots/light-band.png`, `shots/dark-pane.png`, `shots/light-pane.png`, `shots/*-window.png`: real captures
 - `shots/band-compare.png`, `shots/pane-compare.png`, `shots/evidence-compare.png`: rendered comparisons
 - `band.html`, `pane.html`, `evidence.html`, `styles.css`: sources of the mock-ups
+
+## Status of the proposals (after the live tests)
+
+Implemented in 0.5.0 to 0.6.2 and checked on the dark theme in the desktop app:
+
+- P0 plan feed, gapless gauge and scanner at the cap (0.5.0).
+- Restyle (0.6.0 to 0.6.2): coral rail on the band, quiet track (`userMessageBackground`), lighter edge cells (`claudeShimmer`), `◢ AGENTS` header with a running count, hairline rules, short tool names, white tool names with only the check mark green, steel-blue subagent names, coloured status words, red failed count, monochrome kind symbols instead of colour emoji.
+- Not implemented: raw hex palettes and gradients (the theme keys adapt per surface where fixed hex cannot), effort pips, cost chips, per-subagent rails (they change pane text that tests match exactly).
+
+Findings from the live captures (`shots/restyle-*.png`):
+
+- `wrap="truncate-end"` on the rule line made the desktop draw every following line in a monospace font; the rule has no `wrap` prop now.
+- A rule as wide as the pane's cell count wraps in the desktop's proportional font, so rules are 22 characters.
+- In a narrow split pane the desktop wraps the band's stats line onto a third row instead of truncating it (also true before the restyle).
+- Light theme not yet captured for the restyle.
