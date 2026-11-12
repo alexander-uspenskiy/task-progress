@@ -1674,6 +1674,19 @@ export const register: Register = on => {
         : [seg(`${tokens(fullInput(cost) + cost.output)} tok`), ...tokSegs(Text, cost)]
     }
 
+    // What the main agent is doing: its turn is running, or it is idle but a
+    // subagent it started is still going (it waits for that), or nothing at all.
+    const runNow = await read($, run)
+    const subsLive = seats.filter(s => s.endedAt === 0).length
+    const mainState: 'working' | 'waiting' | 'idle' = runNow.isActive ? 'working' : subsLive > 0 ? 'waiting' : 'idle'
+    const mainStateText =
+      mainState === 'working'
+        ? '◐ working'
+        : mainState === 'waiting'
+          ? `◔ waiting for ${subsLive} subagent${subsLive === 1 ? '' : 's'}`
+          : '○ idle'
+    const mainStateColor = mainState === 'working' ? 'claude' : mainState === 'waiting' ? 'warning' : PALETTE.muted
+
     // Main agent: a card of its own at the top.
     const mainCalls = log.filter(c => c.agentId === MAIN)
     const tally = new Map<string, number>()
@@ -1699,6 +1712,10 @@ export const register: Register = on => {
         </Text>
       </Box>,
       ...draw('ms', isBeside ? setupLines.slice(1) : setupLines, 4),
+      <Text key="mstate" color={mainStateColor} wrap="truncate-end">
+        {'    '}
+        {mainStateText}
+      </Text>,
       ...plain('mc', costOf(MAIN), 4),
       ...plain(
         'mt',
@@ -1836,7 +1853,7 @@ export const register: Register = on => {
 
     // Agents at work now: the subagents still going, and the main agent while its
     // turn is active (it has a card of its own but is not in the subagent roster).
-    const working = running + ((await read($, run)).isActive ? 1 : 0)
+    const working = running + (runNow.isActive ? 1 : 0)
 
     // A hairline between sections instead of a blank line (the same one row).
     // Short on purpose: in the desktop's proportional font a `─` is wider than an
@@ -1855,7 +1872,7 @@ export const register: Register = on => {
           <Text bold color="claude">◢ AGENTS</Text>
           <Text color={working > 0 ? 'success' : PALETTE.muted} wrap="truncate-end">
             {'  '}
-            {working > 0 ? '●' : '○'} {working} running
+            {working > 0 ? '●' : '○'} {working} running{mainState === 'waiting' ? ' · main waiting' : ''}
           </Text>
         </Box>
         <Text bold>Tokens</Text>

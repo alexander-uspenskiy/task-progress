@@ -38,6 +38,7 @@ Tokens
     312.0k in (305.4k cached) · 2.6k out · est. $0.52
 ──────────────────────────────────
 ▌ ◆ Main agent  sonnet-5-5 · effort high
+    ◐ working
     9.8k tok · 7.9k in (7.1k cached) · 1.9k out · est. $0.11
     14 tools · Read×6 Bash×4 Edit×3 Grep×1
     ✓ Edit hooks/register.tsx · 120ms
@@ -147,7 +148,7 @@ If the marketplace name `task-progress` is already taken by the GitHub one, remo
 - If the Claude desktop app keeps its own plan (`mcp__ccd_turn__update_plan`), the bar follows it the same way, with at most 60 steps, and `mcp__ccd_turn__wrap_up` marks every step done. Both kinds of list feed the same bar. The reminder still asks for `TaskCreate` and `TaskUpdate`.
 - With no task list and no finished subagents, the percentage is an estimate that stops at 95%. At 95% while a run is active, the figure gives way to the word `working`, a 3-cell comet sweeps the track, and the line reads `N tool calls · no task list`, so the bar does not look frozen. It stays that way until the turn ends.
 - `/task-agents` opens the pane again at any time.
-- In the pane, under an `◢ AGENTS` header with the live count of running subagents: totals first, then the Main agent (model, effort, tokens, a tally of its tools, its last calls with status and duration), then a card per running subagent (status icon, kind icon, name and description, short id, status, model, effort, tool count, tokens, last calls), then History. Hairline rules separate the sections. The pane trims cards to fit its height and says how many older agents are not shown. Tool names drop their `mcp__server__` prefix, so `mcp__windows-mcp__Screenshot` shows as `Screenshot`. A completed call shows its name in the normal text color with only the check mark green; a running or failed call's name is bold in its status color. A running subagent's name is steel blue (`professionalBlue`), its status word takes the color of its status marker, and the main agent's failed count is red.
+- In the pane, under an `◢ AGENTS` header with the live count of agents at work (the main agent while its turn is running, plus every running subagent; when the main agent is idle but a subagent it started is still going, the header adds `· main waiting`): totals first, then the Main agent (model, effort, its state as `◐ working`, `◔ waiting for N subagents` or `○ idle`, tokens, a tally of its tools, its last calls with status and duration), then a card per running subagent (status icon, kind icon, name and description, short id, status, model, effort, tool count, tokens, last calls), then History. Hairline rules separate the sections. The pane trims cards to fit its height and says how many older agents are not shown. Tool names drop their `mcp__server__` prefix, so `mcp__windows-mcp__Screenshot` shows as `Screenshot`. A completed call shows its name in the normal text color with only the check mark green; a running or failed call's name is bold in its status color. A running subagent's name is steel blue (`professionalBlue`), its status word takes the color of its status marker, and the main agent's failed count is red.
 - Status markers: `○` pending, `◐` running, `◔` waiting, `◌` idle, `●` completed, `✗` failed or killed.
 - `/clear` ends the session for the mod and resets every figure; saved prices are kept.
 

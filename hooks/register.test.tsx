@@ -585,23 +585,24 @@ test('the AGENTS header counts the main agent while its turn is active, plus run
 
   const header = async () => {
     const pane = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 60 } } as never)
-    const found = await pane.find({ type: 'Text', text: / running$/ })
+    const found = await pane.find({ type: 'Text', text: /\d+ running/ })
+    const state = await pane.find({ type: 'Text', text: /^\s*(◐ working|◔ waiting for \d+ subagents?|○ idle)$/ })
     await pane.unmount()
-    return { text: found?.text?.trim(), color: found?.props?.color }
+    return { text: found?.text?.trim(), color: found?.props?.color, state: state?.text?.trim(), stateColor: state?.props?.color }
   }
 
   // nothing has run yet
-  expect((await header()).text).toBe('○ 0 running')
+  expect(await header()).toMatchObject({ text: '○ 0 running', state: '○ idle', stateColor: 'inactive' })
 
   // the main agent's turn is active: it counts as one, with no subagent at all
   await $.prompt.submit({ text: 'go' } as never)
   await clock.advance(500)
-  expect(await header()).toEqual({ text: '● 1 running', color: 'success' })
+  expect(await header()).toEqual({ text: '● 1 running', color: 'success', state: '◐ working', stateColor: 'claude' })
 
   // a subagent joins it
   listed = [{ id: 'abcdef123456', description: 'find hooks', type: 'Explore', status: 'running' }]
   await clock.advance(500)
-  expect((await header()).text).toBe('● 2 running')
+  expect(await header()).toMatchObject({ text: '● 2 running', state: '◐ working' })
 
   // the main turn ends while the subagent still runs: only the subagent is left
   await $.turn.complete({
@@ -613,5 +614,9 @@ test('the AGENTS header counts the main agent while its turn is active, plus run
     usage: null,
   } as never)
   await clock.advance(500)
-  expect((await header()).text).toBe('● 1 running')
+  expect(await header()).toMatchObject({
+    text: '● 1 running · main waiting',
+    state: '◔ waiting for 1 subagent',
+    stateColor: 'warning',
+  })
 })
