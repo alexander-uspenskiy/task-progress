@@ -6,25 +6,25 @@ It only observes. It does add one fixed reminder to each prompt (see [How it wor
 
 ## What you get
 
-- **Progress bar** above the prompt while a task runs: 20 segments, coral fill on a dark track. Colors are theme keys, so it follows the dark, light and auto themes.
-- **Real progress when there is a task list.** The bar follows the model's own list (`TaskCreate` / `TaskUpdate` and `TodoWrite`). With no list it counts finished subagents if there are any, and otherwise shows an estimate (`~42%`, never above 95%) learned from the median tool-call count and duration of your past turns.
+- **Progress bar** above the prompt while a task runs: 40 segments with no gaps between them, coral fill on a dark track, and the leading cell glowing while the run is active. Colors are theme keys, so it follows the dark, light and auto themes.
+- **Real progress when there is a task list.** The bar follows the model's own list (`TaskCreate` / `TaskUpdate` and `TodoWrite`) and the Claude desktop app's plan (`mcp__ccd_turn__update_plan`, with `mcp__ccd_turn__wrap_up` marking every step done). With no list it counts finished subagents if there are any, and otherwise shows an estimate (`~42%`, never above 95%) learned from the median tool-call count and duration of your past turns.
 - **Token row** under the bar: `turn ... · session ...`, with `in` (fresh + cache reads + cache writes, the cached part in brackets), `out`, and an estimated cost.
 - **Agents pane**, opened by a prompt and by `/task-agents`: session and turn totals, a Main agent card, a card per running subagent, and a short History of finished subagents.
 - **Kind icons** for agents (explore, plan, review, test, and so on), picked from the agent's type and name.
 
 ## What it looks like
 
-The band. Each segment is a colored cell in the terminal; `█` is lit and `░` is the track:
+The band. Each segment is a colored cell in the terminal, and the cells sit side by side; `█` is lit and `░` is the track:
 
 ```
-█ █ █ █ █ █ █ █ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░  ~42% · 0:48 · 9 tool calls · estimated
+████████████████░░░░░░░░░░░░░░░░░░░░░░░░  ~42% · 0:48 · 9 tool calls · estimated
 turn 24.8k in (24.1k cached) · 1.9k out · est. $0.03 · session 310.5k in (298.0k cached) · 6.2k out · est. $0.41
 ```
 
 With a task list the percent is exact and the current task is named:
 
 ```
-█ █ █ █ █ █ █ █ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░ ░  40%  2/5 · 1:12 · Write the tests
+████████████████░░░░░░░░░░░░░░░░░░░░░░░░  40%  2/5 · 1:12 · Write the tests
 ```
 
 The pane (numbers are illustrative):
@@ -64,7 +64,7 @@ All of it lives in `hooks/register.tsx`.
 | Piece | What it does |
 |---|---|
 | `prompt.submit` | Starts a turn (clears the turn totals, sets the estimate from past turns), opens the pane, starts a 400 ms poll that stops when nothing is running, loads prices, and adds a fixed reminder to the prompt context. A prompt sent while a run is still going continues the same turn. |
-| `tool.call` | Logs every call of the main agent and subagents (running, then done or error, with duration). `TodoWrite`, `TaskCreate` and `TaskUpdate` calls also feed the task list. |
+| `tool.call` | Logs every call of the main agent and subagents (running, then done or error, with duration). `TodoWrite`, `TaskCreate` and `TaskUpdate` calls also feed the task list. The desktop app's `mcp__ccd_turn__update_plan` calls feed it too (its `items`, `advance`, `done` and `start` fields, at most 60 steps), and `mcp__ccd_turn__wrap_up` marks every step completed. |
 | `turn.step` | Records each request's model and effort (effort is only known here) and adds its token usage to the ledger. |
 | `turn.complete` | The turn's closing report adds whatever the requests missed, saves the ledger, and for a main turn records its tool count and duration for the estimate. |
 | `agent.spawn`, `classic.SubagentStop`, `classic.Stop` | Learn a subagent's model at spawn; read a subagent's own transcript when it stops; read transcripts of finished subagents at the end of a main turn. |
@@ -142,7 +142,9 @@ If the marketplace name `task-progress` is already taken by the GitHub one, remo
 ## Using it
 
 - Send a prompt. The pane opens and the band appears above the prompt while the run is active. The band stays while listed tasks are still open, and hides when everything is done or a survey is showing.
-- For a task of three or more steps the model is asked to create a task list, and the bar then shows `done/total` and the name of the task in progress. The next segment blinks while the run is active.
+- For a task of three or more steps the model is asked to create a task list, and the bar then shows `done/total` and the name of the task in progress. The last lit segment glows while the run is active, and the next segment blinks.
+- If the Claude desktop app keeps its own plan (`mcp__ccd_turn__update_plan`), the bar follows it the same way, with at most 60 steps, and `mcp__ccd_turn__wrap_up` marks every step done. Both kinds of list feed the same bar. The reminder still asks for `TaskCreate` and `TaskUpdate`.
+- With no task list and no finished subagents, the percentage is an estimate that stops at 95%. At 95% while a run is active, the figure gives way to the word `working`, a 3-cell comet sweeps the track, and the line reads `N tool calls · no task list`, so the bar does not look frozen. It stays that way until the turn ends.
 - `/task-agents` opens the pane again at any time.
 - In the pane: totals first, then the Main agent (model, effort, tokens, a tally of its tools, its last calls with status and duration), then a card per running subagent (status icon, kind icon, name and description, short id, status, model, effort, tool count, tokens, last calls), then History. The pane trims cards to fit its height and says how many older agents are not shown.
 - Status markers: `○` pending, `◐` running, `◔` waiting, `◌` idle, `●` completed, `✗` failed or killed.
@@ -169,7 +171,8 @@ There is no `userConfig`. Change behavior by editing constants in `hooks/registe
 
 | Constant | Controls |
 |---|---|
-| `SEGMENTS` | Number of bar segments (20). |
+| `SEGMENTS` | Number of bar segments, drawn as adjacent cells (40). |
+| `ESTIMATE_CAP` | The highest share the estimate shows without a task list (0.95). At the cap the band shows `working` and a comet instead of a figure. |
 | `PALETTE`, `COLOR` | Theme keys for the bar and for status colors. |
 | `SETUP_COLOR` | Color of model and effort (`suggestion`). |
 | `HISTORY_DONE_COLOR`, `HISTORY_SHOWN` | Color of finished markers in History; how many history lines are shown (6). |
@@ -184,7 +187,7 @@ Keep icons single code point emoji, as the file comment says, so they keep their
 
 ## Requirements and limitations
 
-- **The percentage without a task list is a guess.** It uses the median tool calls and duration of your last 20 turns (defaults of 8 calls and 60 s until there is history), is marked `~` and `estimated`, and stops at 95% so it only finishes when the turn does.
+- **The percentage without a task list is a guess.** It uses the median tool calls and duration of your last 20 turns (defaults of 8 calls and 60 s until there is history), is marked `~` and `estimated`, and stops at 95%. At 95% while a run is active the band shows `working` and a sweeping comet instead of a figure, so it only finishes when the turn does.
 - **Cost is a list-price, API-equivalent estimate.** It is not what a subscription pays. Cache writes are all priced at the 5-minute rate because the engine reports one cache-write count with no 5m/1h split. Batch or priority discounts, regional pricing and subscriptions are not applied. It is left out for models with no price, and the pricing page layout may change.
 - **Subagent requests may not reach the hooks.** Their tokens then come from their own transcript when they stop (or when backfilled), so they can appear later than the work. Effort is only known for agents whose requests reach the hooks; others show a model and no effort. Without the transcript folder, `HOME`, or readable files, a subagent's tokens stay uncounted.
 - **A subagent transcript over 4 MiB cannot be read** (the engine's file read has a size limit and no ranged read), so a very long subagent is not counted from its transcript; the footer says `transcript over 4 MiB, not counted`.

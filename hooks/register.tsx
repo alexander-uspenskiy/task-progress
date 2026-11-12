@@ -19,7 +19,15 @@ import type {
 
 const PANE = 'task-agents'
 const MAIN = 'main'
-const SEGMENTS = 20
+// Gapless cells: 40 of them take the width the old 20 cells plus gaps did.
+const SEGMENTS = 40
+// The estimate never claims more than this; at the cap the band stops showing a
+// percent and shows a scanner, because a bar frozen at 95% reads as stuck.
+const ESTIMATE_CAP = 0.95
+// The desktop app's own task list. Its calls carry the plan, so the band follows it.
+const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
+const WRAP_TOOL = 'mcp__ccd_turn__wrap_up'
+const PLAN_MAX = 60
 const TICK_MS = 400
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -103,6 +111,7 @@ const ICON: Record<string, string> = {
 //   error     red               red               failed
 const PALETTE = {
   fill: 'claude',
+  glow: 'text', // the cell at the leading edge: near-white on dark, near-black on light
   track: 'subtle',
   text: 'text',
   muted: 'inactive',
@@ -555,7 +564,52 @@ const estimate = (r: Run) => {
   const byTools = r.tools / (Math.max(1, r.expectedTools) * 1.3)
   const byTime = seconds / (Math.max(1, r.expectedSeconds) * 1.3)
   const shown = Math.max(byTools, byTime)
-  return Number.isFinite(shown) ? Math.min(0.95, Math.max(0, shown)) : 0
+  return Number.isFinite(shown) ? Math.min(ESTIMATE_CAP, Math.max(0, shown)) : 0
+}
+
+// The desktop app's `update_plan` input, read as hostile: `items` replaces the
+// list, `advance` finishes the current step and starts the next, `done` and
+// `start` name steps by their 1-based number. Anything else is ignored.
+const planStatus = (v: unknown): Todo['status'] =>
+  v === 'completed' || v === 'in_progress' ? v : 'pending'
+const planStep = (v: unknown, length: number): number =>
+  typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= length ? v - 1 : -1
+const applyPlan = (list: Todo[], input: Record<string, unknown>): Todo[] => {
+  let next = list
+  if (Array.isArray(input.items)) {
+    next = []
+    for (const item of input.items.slice(0, PLAN_MAX)) {
+      if (!isObj(item)) continue
+      const i = next.length
+      next.push({
+        id: `plan-${i}`,
+        content: clean(item.content, 200) || `step ${i + 1}`,
+        status: planStatus(item.status),
+      })
+    }
+  }
+  if (input.advance === true) {
+    const now = next.findIndex(t => t.status === 'in_progress')
+    const after = next.findIndex((t, i) => i > now && t.status === 'pending')
+    next = next.map((t, i) =>
+      i === now ? { ...t, status: 'completed' as const } : i === after ? { ...t, status: 'in_progress' as const } : t,
+    )
+  }
+  if (Array.isArray(input.done)) {
+    const finished = new Set(input.done.slice(0, PLAN_MAX).map(n => planStep(n, next.length)))
+    next = next.map((t, i) => (finished.has(i) ? { ...t, status: 'completed' as const } : t))
+  }
+  const started = planStep(input.start, next.length)
+  if (started >= 0) {
+    next = next.map((t, i) =>
+      i === started
+        ? { ...t, status: 'in_progress' as const }
+        : t.status === 'in_progress'
+          ? { ...t, status: 'pending' as const }
+          : t,
+    )
+  }
+  return next
 }
 
 // Todos drive the bar when the model keeps a list; otherwise subagents do.
@@ -1368,6 +1422,25 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // The desktop app keeps its own task list (`update_plan`) and checks it off at
+  // `wrap_up`; the band follows it the same way it follows TaskCreate/TaskUpdate.
+  on('tool.call', { tool: PLAN_TOOL }, async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny === undefined && ran.isError !== true) {
+      const input: unknown = e
+      if (isObj(input)) await update($, todos, list => applyPlan(list, input))
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: WRAP_TOOL }, async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny === undefined && ran.isError !== true) {
+      await update($, todos, list => list.map(t => ({ ...t, status: 'completed' as const })))
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     // The turn's closing report is the authority on what it cost: add whatever
     // its own requests did not already count.
@@ -1412,25 +1485,33 @@ export const register: Register = on => {
     const fill = isDone ? PALETTE.done : PALETTE.fill
     const beat = Math.floor(r.now / TICK_MS)
 
-    // Segmented cells: a background-coloured space is the same solid block in
-    // every font. Real progress from the task list when there is one, else the
-    // estimate above, marked with a `~`.
+    // A gauge of adjacent cells: a background-coloured space is the same solid
+    // block in every font, and with no gaps between them the fill reads as one
+    // bar. Real progress from the task list when there is one, else the estimate
+    // above, marked with a `~`. The last lit cell glows while the run is active and
+    // the next one blinks. At the estimate's cap there is nothing left to measure
+    // against, so a short comet sweeps the track instead of a bar frozen at 95%.
     const isEstimate = total === 0
     const shown = isEstimate ? estimate(r) : ratio
+    const isScanning = isEstimate && r.isActive && shown >= ESTIMATE_CAP
     const lit = Math.floor(shown * SEGMENTS)
+    const head = ((beat * 2) % (SEGMENTS + 4)) - 2
     const colorOf = (i: number) => {
-      if (i < lit) return fill
-      return i === lit && r.isActive && !isDone && beat % 2 === 0
-        ? fill
-        : PALETTE.track
+      if (isScanning) {
+        return i === head ? PALETTE.glow : i < head && i >= head - 2 ? fill : PALETTE.track
+      }
+      if (i < lit - 1) return fill
+      if (i === lit - 1) return isDone || !r.isActive ? fill : PALETTE.glow
+      return i === lit && r.isActive && !isDone && beat % 2 === 0 ? fill : PALETTE.track
     }
 
     const bar = []
     for (let i = 0; i < SEGMENTS; i++) {
       bar.push(<Text key={`s${i}`} backgroundColor={colorOf(i)}>{' '}</Text>)
-      if (i < SEGMENTS - 1) bar.push(<Text key={`g${i}`}>{' '}</Text>)
     }
-    const percent = `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
+    const percent = isScanning
+      ? 'working'
+      : `${isEstimate ? '~' : ''}${Math.round(shown * 100)}%`
     const { turn: thisTurn, agents: perAgent, retired } = norm(await read($, ledger))
     const session = addTok(sumUsage(perAgent), retired)
     const hasTokens = fullInput(session) + session.output > 0
@@ -1447,7 +1528,11 @@ export const register: Register = on => {
         <Text color={PALETTE.muted} wrap="truncate-end">
           {' '}
           · {elapsed}
-          {isEstimate ? ` · ${r.tools} tool calls · estimated` : ''}
+          {isScanning
+            ? ` · ${r.tools} tool calls · no task list`
+            : isEstimate
+              ? ` · ${r.tools} tool calls · estimated`
+              : ''}
           {label === '' ? '' : ` · ${label}`}
         </Text>
       </Box>

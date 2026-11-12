@@ -79,11 +79,104 @@ test('without a task list the estimate climbs with tool calls and stops short of
   const before = await percent()
   for (let i = 0; i < 3; i++) await $.tool.call({ tool: 'Bash', command: 'true' } as never)
   const mid = await percent()
-  for (let i = 0; i < 40; i++) await $.tool.call({ tool: 'Bash', command: 'true' } as never)
-  const late = await percent()
-
   expect(mid).toBeGreaterThan(before)
-  expect(late).toBeLessThanOrEqual(95)
+
+  // At the cap the band says so: a scanner and "working", no percent frozen at 95.
+  for (let i = 0; i < 40; i++) await $.tool.call({ tool: 'Bash', command: 'true' } as never)
+  const ui = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
+  expect(await ui.find({ type: 'Text', text: /working/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /no task list/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /~\d+%/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the band follows the desktop update_plan list and its wrap_up', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  mock.clock(on)
+  mock.store(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('agent.list', () => ({ value: [] }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('tool.call', () => ({ result: { text: 'ok' } }) as never)
+  await $.prompt.submit({ text: 'go' } as never)
+
+  const plan = (input: Record<string, unknown>) =>
+    $.tool.call({ tool: 'mcp__ccd_turn__update_plan', ...input } as never)
+  const seen = async (re: RegExp) => {
+    const ui = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
+    const found = await ui.find({ type: 'Text', text: re })
+    await ui.unmount()
+    return found !== undefined
+  }
+
+  await plan({
+    items: [
+      { content: 'Read the code', status: 'in_progress' },
+      { content: 'Write the fix', status: 'pending' },
+      { content: 'Run the tests', status: 'pending' },
+      { content: 'Write the docs', status: 'pending' },
+    ],
+  })
+  expect(await seen(/0%/)).toBe(true)
+  expect(await seen(/Read the code/)).toBe(true)
+
+  await plan({ advance: true })
+  expect(await seen(/25%/)).toBe(true)
+  expect(await seen(/Write the fix/)).toBe(true)
+
+  await plan({ done: [3] })
+  expect(await seen(/50%/)).toBe(true)
+
+  await plan({ start: 4 })
+  expect(await seen(/Write the docs/)).toBe(true)
+
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'done' } as never)
+  expect(await seen(/100%/)).toBe(true)
+})
+
+test('update_plan input is read as hostile: bad shapes change nothing, size is capped', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  mock.clock(on)
+  mock.store(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('agent.list', () => ({ value: [] }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('tool.call', () => ({ result: { text: 'ok' } }) as never)
+  await $.prompt.submit({ text: 'go' } as never)
+
+  const plan = (input: Record<string, unknown>) =>
+    $.tool.call({ tool: 'mcp__ccd_turn__update_plan', ...input } as never)
+  const text = async () => {
+    const ui = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
+    const found = await ui.find({ type: 'Text', text: /\d+%/ })
+    await ui.unmount()
+    return found?.text ?? ''
+  }
+
+  await plan({
+    items: [
+      null,
+      7,
+      'x',
+      { content: `bad\u0007‮${'y'.repeat(500)}`, status: 'nonsense' },
+      { content: 'ok', status: 'completed' },
+    ],
+  })
+  // two real steps: one finished, one pending with an unknown status
+  expect(await text()).toMatch(/50%/)
+
+  await plan({ done: [0, -1, 1.5, 99, 'one', null, {}], start: 'last', advance: 'yes' })
+  expect(await text()).toMatch(/50%/)
+  await plan({ items: 'not a list', done: 'all' })
+  expect(await text()).toMatch(/50%/)
+  await plan({ items: Array.from({ length: 5000 }, () => ({ content: 'a', status: 'pending' })) })
+  expect(await text()).toMatch(/0%/)
 })
 
 test('the pane lists a subagent with its tools, status and token usage', async ($, on) => {
