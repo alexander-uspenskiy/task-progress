@@ -27,7 +27,7 @@ Almost everything is in `hooks/register.tsx` (state atoms and pure helpers at th
 
 **State has two layers.**
 - *Engine atoms* (in memory, via `atom`/`read`/`update`): `todos`, `calls` (last 400), `agents`, `roster1` (subagent seats, last 40), `setups` (model and effort per agent), `run`, `diag2`, `prices1`, and `ledger1`. Atom keys are versioned (`ledger1`, `roster1`, `prices1`, `diag2`); change the shape of one and bump its key (and the `types/index.d.ts` entry) so state from older builds is not carried over.
-- *Plugin store* (`$.store`, survives reloads): `history` (last 20 turns' tool count and seconds, used for the no-task-list estimate), `prices`, `pricesTriedAt`, and `ledger:<session id>` (8 most recent sessions; the current one is deleted on `session.end`).
+- *Plugin store* (`$.store`, survives reloads): `history` (last 20 turns' tool count and seconds, used for the no-task-list estimate), `prices`, `pricesTriedAt`, and `ledger:<session id>` (sessions of the last 7 days, capped at 50; the current one is deleted on `session.end`). `pruneStore` (run from `loadPrices`, so at load and at each prompt, from a timer) deletes saved ledgers, `prices` and `pricesTriedAt` older than `KEEP_DAYS` (7); the running session's own ledger is exempt; `history` has no dates and is not pruned.
 
 **The token ledger is one atom on purpose.** `ledger1` holds `turn`, per-`agents` totals, `retired` (agents pruned by the cap) and `seen` (what each turn's own requests already counted) so the parts can never disagree. Every write goes through `tally`, in a single `update`. Tokens reach it three ways, and each must add only the *difference* from what is already counted, never the full figure, to avoid double counting:
 1. `turn.step` (per model request, via `count`),
@@ -46,8 +46,9 @@ Almost everything is in `hooks/register.tsx` (state atoms and pure helpers at th
 - The mod only observes; it never denies or rewrites tool calls. Its single change to a prompt is `TASK_HINT`.
 - Cost uses list prices parsed from `platform.claude.com/docs/en/about-claude/pricing.md` (the only network call, one a day). A model with no price shows no cost, and a `+` after the figure marks partial pricing. All cache writes are priced at the 5-minute rate.
 - `$.fs.read` has a 4 MiB limit and no ranged read, so larger subagent transcripts are skipped (`TRANSCRIPT_LIMIT`).
-- Agent icons must be single code point emoji (`ICON_RULES`) so terminal width stays stable.
-- Colors are engine theme keys (`claude`, `subtle`, `inactive`, `success`, …), never hex.
+- Agent icons (`ICON_RULES`) must be one-cell monochrome symbols from the Basic Multilingual Plane (`◈ ◉ ▣ …`), never colour emoji: they take the colour of the status marker and keep their width. `cells()` counts anything from U+1F000 up as two cells.
+- Colors are engine theme keys (`claude`, `claudeShimmer`, `userMessageBackground`, `professionalBlue`, `inactive`, `success`, …), never hex: the CLI and the desktop app map the same key to their own value, so a key adapts to dark and light where a fixed hex cannot. The CLI's theme tables (all keys per theme) are strings inside its `claude.exe`.
+- Do not type `\uXXXX` escapes of control or bidi characters through a tool argument: they arrive as the literal character. Build such test strings with `String.fromCharCode` or `\u{...}` built from parts.
 
 ## Tests
 

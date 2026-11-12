@@ -164,7 +164,7 @@ test('update_plan input is read as hostile: bad shapes change nothing, size is c
       null,
       7,
       'x',
-      { content: `bad\u0007‮${'y'.repeat(500)}`, status: 'nonsense' },
+      { content: `bad\u0007\u202e${'y'.repeat(500)}`, status: 'nonsense' },
       { content: 'ok', status: 'completed' },
     ],
   })
@@ -489,20 +489,20 @@ test('each agent type gets its own small icon next to its status', async ($, on)
 
   // a tall pane, so all thirteen cards fit
   const pane = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 160 } } as never)
-  expect(await pane.find({ type: 'Text', text: /◐ 🔍/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /● 👷/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /○ 🔬/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /✗ 🧐/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /◌ 💻/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /◔ 🤖/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /◐ 🧭/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /● 🎼/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /◐ 🌐/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /● 🌐/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /○ 📦/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /✗ 🚦/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /◌ 📖/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /▌ 🧠 Main agent/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◐ ◈/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /● ▪/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /○ ◇/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /✗ ◉/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◌ ❯/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◔ ◦/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◐ ◎/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /● ❖/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◐ ⌘/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /● ⌘/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /○ ▲/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /✗ ▣/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /◌ ≡/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /▌ ◆ Main agent/ })).toBeDefined()
   await pane.unmount()
 
   // a short pane cannot fit them all: it says how many it left out
@@ -560,10 +560,58 @@ test('a finished subagent moves into the history with the tokens it spent', asyn
   for (const text of [/^unlisted-9$/, /^effort high$/]) {
     expect((await done.find({ type: 'Text', text }))?.props?.color).toBe('suggestion')
   }
-  expect(await done.find({ type: 'Text', text: /● 🔍/ })).toBeDefined()
+  expect(await done.find({ type: 'Text', text: /● ◈/ })).toBeDefined()
   // a completed agent's marker is gray in the history, not green
-  const marker = await done.find({ type: 'Text', text: /^● 🔍\s*$/ })
+  const marker = await done.find({ type: 'Text', text: /^● ◈\s*$/ })
   expect(marker?.props?.color).toBe('inactive')
   expect(await done.find({ type: 'Text', text: /Explore \(find hooks\)/ })).toBeUndefined()
   await done.unmount()
+})
+
+test('the AGENTS header counts the main agent while its turn is active, plus running subagents', async ($, on) => {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  mock.store(on)
+  on('http.fetch', () => ({ value: { status: 503, ok: false, headers: {}, text: '' } }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('tool.call', () => ({ result: { text: 'ok' } }) as never)
+  on('turn.complete', (_$, e) => ({ text: e.answer }) as never)
+  let listed: unknown[] = []
+  on('agent.list', () => ({ value: listed }) as never)
+
+  const header = async () => {
+    const pane = await $.ui.mount({ ...PANE, viewport: { columns: 80, rows: 60 } } as never)
+    const found = await pane.find({ type: 'Text', text: / running$/ })
+    await pane.unmount()
+    return { text: found?.text?.trim(), color: found?.props?.color }
+  }
+
+  // nothing has run yet
+  expect((await header()).text).toBe('○ 0 running')
+
+  // the main agent's turn is active: it counts as one, with no subagent at all
+  await $.prompt.submit({ text: 'go' } as never)
+  await clock.advance(500)
+  expect(await header()).toEqual({ text: '● 1 running', color: 'success' })
+
+  // a subagent joins it
+  listed = [{ id: 'abcdef123456', description: 'find hooks', type: 'Explore', status: 'running' }]
+  await clock.advance(500)
+  expect((await header()).text).toBe('● 2 running')
+
+  // the main turn ends while the subagent still runs: only the subagent is left
+  await $.turn.complete({
+    answer: 'ok',
+    durationMs: 10,
+    isAborted: false,
+    turnId: 'm',
+    reason: 'answer',
+    usage: null,
+  } as never)
+  await clock.advance(500)
+  expect((await header()).text).toBe('● 1 running')
 })

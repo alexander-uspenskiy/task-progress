@@ -6,7 +6,7 @@ It only observes. It does add one fixed reminder to each prompt (see [How it wor
 
 ## What you get
 
-- **Progress bar** above the prompt while a task runs: 40 segments with no gaps between them, coral fill on a dark track, and the leading cell glowing while the run is active. Colors are theme keys, so it follows the dark, light and auto themes.
+- **Progress bar** above the prompt while a task runs: 40 segments with no gaps between them, a rail (`▌`) in the fill color at the start of both rows, a coral fill on a quiet track, and the two leading cells a lighter coral while the run is active. Colors are theme keys, so it follows the dark, light and auto themes. The CLI and the desktop app map the same keys to their own values, so the look adapts to dark and light but is not pixel-identical across the two.
 - **Real progress when there is a task list.** The bar follows the model's own list (`TaskCreate` / `TaskUpdate` and `TodoWrite`) and the Claude desktop app's plan (`mcp__ccd_turn__update_plan`, with `mcp__ccd_turn__wrap_up` marking every step done). With no list it counts finished subagents if there are any, and otherwise shows an estimate (`~42%`, never above 95%) learned from the median tool-call count and duration of your past turns.
 - **Token row** under the bar: `turn ... · session ...`, with `in` (fresh + cache reads + cache writes, the cached part in brackets), `out`, and an estimated cost.
 - **Agents pane**, opened by a prompt and by `/task-agents`: session and turn totals, a Main agent card, a card per running subagent, and a short History of finished subagents.
@@ -14,44 +14,45 @@ It only observes. It does add one fixed reminder to each prompt (see [How it wor
 
 ## What it looks like
 
-The band. Each segment is a colored cell in the terminal, and the cells sit side by side; `█` is lit and `░` is the track:
+The band. Each segment is a cell with a background color, and the cells sit side by side. In this sketch `█` is a lit cell and `░` the track; the `▌` rail starts each row:
 
 ```
-████████████████░░░░░░░░░░░░░░░░░░░░░░░░  ~42% · 0:48 · 9 tool calls · estimated
-turn 24.8k in (24.1k cached) · 1.9k out · est. $0.03 · session 310.5k in (298.0k cached) · 6.2k out · est. $0.41
+▌ ████████████████░░░░░░░░░░░░░░░░░░░░░░░░  ~42% · 0:48 · 9 tool calls · estimated
+▌ turn 24.8k in (24.1k cached) · 1.9k out · est. $0.03 · session 310.5k in (298.0k cached) · 6.2k out · est. $0.41
 ```
 
 With a task list the percent is exact and the current task is named:
 
 ```
-████████████████░░░░░░░░░░░░░░░░░░░░░░░░  40%  2/5 · 1:12 · Write the tests
+▌ ████████████████░░░░░░░░░░░░░░░░░░░░░░░░  40%  2/5 · 1:12 · Write the tests
 ```
 
 The pane (numbers are illustrative):
 
 ```
+◢ AGENTS  ● 1 running
 Tokens
   session (all agents)
     1.4M in (1.3M cached) · 11.2k out · est. $2.31
   this turn
     312.0k in (305.4k cached) · 2.6k out · est. $0.52
-
-▌ 🧠 Main agent  sonnet-5-5 · effort high
+──────────────────────────────────
+▌ ◆ Main agent  sonnet-5-5 · effort high
     9.8k tok · 7.9k in (7.1k cached) · 1.9k out · est. $0.11
     14 tools · Read×6 Bash×4 Edit×3 Grep×1
     ✓ Edit hooks/register.tsx · 120ms
     ◐ Bash npm test · running
-
+──────────────────────────────────
 Subagents · 3 total · 1 active
-◐ 🔍 Explore (find hooks)
+◐ ◈ Explore (find hooks)
     a1b2c3d4 · running · haiku-5-5 · effort low
     5 tools · 101.5k tok · 100.9k in (96.0k cached) · 0.6k out · est. $0.03
     ✓ Grep register · 0.3s
-
+──────────────────────────────────
 History · 2 of 2 finished · 305.1k tok · est. $0.12
-● 🧪 Tester · sonnet-5-5 · 203.6k tok · est. $0.09 · 12 tools · 1m05s · run the suite
-● 🧐 Reviewer · sonnet-5-5 · 101.5k tok · est. $0.03 · 3 tools · 5s · review the diff
-
+● ▥ Tester · sonnet-5-5 · 203.6k tok · est. $0.09 · 12 tools · 1m05s · run the suite
+● ◉ Reviewer · sonnet-5-5 · 101.5k tok · est. $0.03 · 3 tools · 5s · review the diff
+──────────────────────────────────
 counted: 41/41 requests (12 from subagents) · 3 turns · 2 subagent transcripts · 94 prices
 ```
 
@@ -76,11 +77,11 @@ All of it lives in `hooks/register.tsx`.
 **Where state lives.**
 
 - Engine state atoms (in memory): task list, agent list, the subagent roster (last 40), the tool-call log (last 400), model and effort per agent, the run clock, and the token ledger.
-- Plugin store (kept across reloads): `history` (tool count and seconds of your last 20 turns, used for the estimate), `prices` and `pricesTriedAt`, and `ledger:<session id>` (token counters of the 8 most recent sessions; the current one is deleted on `session.end`).
+- Plugin store (kept across reloads): `history` (tool count and seconds of your last 20 turns, used for the estimate), `prices` and `pricesTriedAt`, and `ledger:<session id>` (token counters of the sessions of the last 7 days, at most 50; the current one is deleted on `session.end`). The store keeps a 7 day window: at each prompt and at load, saved ledgers, the saved price list and the time of the last price fetch that are older than 7 days (or have no readable date) are deleted; the running session's own ledger is not touched. The turn `history` has no dates and is not part of the window.
 
 **Tokens.** Counted per model request from `turn.step`, for the main agent and, when they reach the hooks, subagents. A turn's closing report fills in anything the requests missed. A subagent's tokens are read from its own transcript when it stops, and finished subagents with no tokens counted are backfilled from the session folder `~/.claude/projects/<project>/<session>/subagents/` at load, on each prompt, on each poll (a few tries, spaced out), and at the end of a turn. Only the difference from what was already counted is added. The ledger is saved to the store (at most every 2 s, and at the end of a turn or subagent) and restored if the in-memory copy is empty after a reload.
 
-**Estimated cost.** On first use the mod fetches `platform.claude.com/docs/en/about-claude/pricing.md` (8 s timeout, run from a timer so it never holds up a prompt), parses the model table, keeps it in the store, and refreshes it when it is over a day old; a failed attempt is not retried within the hour. Each request is priced at its model's list rate, using the long-prompt rate when the page lists one and the prompt is over its limit. If a model has no price, or the fetch failed, that cost is left out; a `+` after the figure means some requests had no price.
+**Estimated cost.** On first use the mod fetches `platform.claude.com/docs/en/about-claude/pricing.md` (8 s timeout, run from a timer so it never holds up a prompt), parses the model table, keeps it in the store, and refreshes it when it is over a day old; a failed attempt is not retried within the hour. A price list older than 7 days is deleted, so a list that could not be refreshed for a week stops pricing anything (no cost is shown until a fetch works). Each request is priced at its model's list rate, using the long-prompt rate when the page lists one and the prompt is over its limit. If a model has no price, or the fetch failed, that cost is left out; a `+` after the figure means some requests had no price.
 
 **Subagent history.** A subagent is moved from its card into History when it completes, fails, is killed, or disappears from the engine's agent list. The last 6 are shown, newest first; the heading gives how many are shown and finished, the tokens of all subagents so far, and their estimated cost.
 
@@ -142,11 +143,11 @@ If the marketplace name `task-progress` is already taken by the GitHub one, remo
 ## Using it
 
 - Send a prompt. The pane opens and the band appears above the prompt while the run is active. The band stays while listed tasks are still open, and hides when everything is done or a survey is showing.
-- For a task of three or more steps the model is asked to create a task list, and the bar then shows `done/total` and the name of the task in progress. The last lit segment glows while the run is active, and the next segment blinks.
+- For a task of three or more steps the model is asked to create a task list, and the bar then shows `done/total` and the name of the task in progress in the main text color (`done` once every step is finished). The two last lit segments glow a lighter coral while the run is active, and the next segment blinks.
 - If the Claude desktop app keeps its own plan (`mcp__ccd_turn__update_plan`), the bar follows it the same way, with at most 60 steps, and `mcp__ccd_turn__wrap_up` marks every step done. Both kinds of list feed the same bar. The reminder still asks for `TaskCreate` and `TaskUpdate`.
 - With no task list and no finished subagents, the percentage is an estimate that stops at 95%. At 95% while a run is active, the figure gives way to the word `working`, a 3-cell comet sweeps the track, and the line reads `N tool calls · no task list`, so the bar does not look frozen. It stays that way until the turn ends.
 - `/task-agents` opens the pane again at any time.
-- In the pane: totals first, then the Main agent (model, effort, tokens, a tally of its tools, its last calls with status and duration), then a card per running subagent (status icon, kind icon, name and description, short id, status, model, effort, tool count, tokens, last calls), then History. The pane trims cards to fit its height and says how many older agents are not shown.
+- In the pane, under an `◢ AGENTS` header with the live count of running subagents: totals first, then the Main agent (model, effort, tokens, a tally of its tools, its last calls with status and duration), then a card per running subagent (status icon, kind icon, name and description, short id, status, model, effort, tool count, tokens, last calls), then History. Hairline rules separate the sections. The pane trims cards to fit its height and says how many older agents are not shown. Tool names drop their `mcp__server__` prefix, so `mcp__windows-mcp__Screenshot` shows as `Screenshot`. A completed call shows its name in the normal text color with only the check mark green; a running or failed call's name is bold in its status color. A running subagent's name is steel blue (`professionalBlue`), its status word takes the color of its status marker, and the main agent's failed count is red.
 - Status markers: `○` pending, `◐` running, `◔` waiting, `◌` idle, `●` completed, `✗` failed or killed.
 - `/clear` ends the session for the mod and resets every figure; saved prices are kept.
 
@@ -154,16 +155,16 @@ Agent kind icons come from `ICON_RULES`, tested top to bottom against the lowerc
 
 | Text matches | Icon | Text matches | Icon |
 |---|---|---|---|
-| coordinat | 🧭 | secur, audit | 🔒 |
-| orchestrat | 🎼 | research, guide, doc | 📖 |
-| browser, web | 🌐 | status, config, setup | 🔩 |
-| explor, search, find | 🔍 | code, coder, engineer, develop, implement, build | 💻 |
-| plan, architect | 🔬 | general, worker | 👷 |
-| design | 📐 | teammate | 🤝 |
-| review | 🧐 | main agent | 🧠 |
-| commit | 📦 | anything else | 🤖 |
-| check, valid, lint | 🚦 | | |
-| test, qa | 🧪 | | |
+| coordinat | ◎ | secur, audit | ▩ |
+| orchestrat | ❖ | research, guide, doc | ≡ |
+| browser, web | ⌘ | status, config, setup | ◍ |
+| explor, search, find | ◈ | code, coder, engineer, develop, implement, build | ❯ |
+| plan, architect | ◇ | general, worker | ▪ |
+| design | ▧ | teammate | ⊕ |
+| review | ◉ | main agent | ◆ |
+| commit | ▲ | anything else | ◦ |
+| check, valid, lint | ▣ | | |
+| test, qa | ▥ | | |
 
 ## Configuration
 
@@ -173,7 +174,7 @@ There is no `userConfig`. Change behavior by editing constants in `hooks/registe
 |---|---|
 | `SEGMENTS` | Number of bar segments, drawn as adjacent cells (40). |
 | `ESTIMATE_CAP` | The highest share the estimate shows without a task list (0.95). At the cap the band shows `working` and a comet instead of a figure. |
-| `PALETTE`, `COLOR` | Theme keys for the bar and for status colors. |
+| `PALETTE`, `COLOR` | Theme keys: `PALETTE` for the band (`fill`, `glow`, `track`, `agent`, `text`, `muted`, `done`), `COLOR` for the status colors. |
 | `SETUP_COLOR` | Color of model and effort (`suggestion`). |
 | `HISTORY_DONE_COLOR`, `HISTORY_SHOWN` | Color of finished markers in History; how many history lines are shown (6). |
 | `ICON_RULES`, `MAIN_ICON`, `OTHER_ICON`, `ICON` | Agent kind icons, the main and fallback icons, status markers. |
@@ -181,9 +182,10 @@ There is no `userConfig`. Change behavior by editing constants in `hooks/registe
 | `PANE_COLUMNS`, `MIN_COLUMNS` | Width the docked pane asks for (34), and the narrowest width the layout plans for (24). |
 | `TASK_HINT` | The reminder added to each prompt. Edit the text, or remove the `context` line at the end of the `prompt.submit` hook to stop adding it. |
 | `PRICING_URL`, `FETCH_TIMEOUT_MS` | Where prices come from and how long the fetch may take. |
-| `KEEP_AGENTS`, `KEEP_SAVED` | How many agents are kept in the ledger, and how many sessions' ledgers are kept in the store. |
+| `KEEP_DAYS` | The store's retention window in days (7): older saved ledgers, prices and price-fetch times are deleted. |
+| `KEEP_AGENTS`, `KEEP_SAVED` | How many agents are kept in the ledger, and the most saved ledgers the store may hold (50; the 7 day window is what normally limits them). |
 
-Keep icons single code point emoji, as the file comment says, so they keep their width.
+Icons are one-cell monochrome symbols from the Basic Multilingual Plane, so they keep their width; a few East Asian terminal fonts may still draw geometric shapes two cells wide.
 
 ## Requirements and limitations
 
@@ -196,7 +198,7 @@ Keep icons single code point emoji, as the file comment says, so they keep their
 - The pane lays itself out for the width it has: a line that does not fit is broken between its parts (` · `), a label that does not fit beside an agent's name moves under it, and a call's hint is cut so its duration stays visible. A single part wider than the whole pane (a very long agent name) is still cut at the edge; hints are shortened to 36 characters.
 - The docked pane asks for `PANE_COLUMNS` (34) columns. That is a request: a width you drag the dock to wins and is remembered, and the inline pane (terminals under 110 columns, or not fullscreen) always spans the terminal.
 - Terminal and desktop: the pane and band are drawn by the Claude Code UI; the desktop Code tab loads user-scope plugins but lacks the install command.
-- Emoji width depends on the terminal font. Single code point emoji were chosen to keep alignment, but some terminals still draw them wide or narrow.
+- Icon width depends on the terminal font. Agent icons are one-cell monochrome symbols from the Basic Multilingual Plane; a few East Asian terminal fonts may still draw geometric shapes two cells wide.
 
 ## Privacy and safety
 

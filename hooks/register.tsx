@@ -101,18 +101,22 @@ const ICON: Record<string, string> = {
 }
 // Theme keys, not hex: the engine resolves them against the person's theme
 // (dark, light, auto), so the bar re-colours itself when the theme switches.
-//   key       dark theme        light theme       used for
-//   claude    coral on black    coral on white    bar fill, percent, running
-//   subtle    dark grey         light grey        bar track
-//   text      near-white        near-black        counts
-//   inactive  mid grey          mid grey          elapsed time, labels
-//   success   green             green             a finished bar, completed
-//   warning   amber             amber             waiting
-//   error     red               red               failed
+//   key                    dark theme      light theme     used for
+//   claude                 coral           coral           bar fill, percent, running, the rail
+//   claudeShimmer          light coral     light coral     the glowing edge of the bar, the comet head
+//   userMessageBackground  #373737         #F0F0F0         the bar's track: a quiet surface, not a line
+//   text                   near-white      near-black      counts, tool names, the task name
+//   inactive               mid grey        mid grey        elapsed time, labels
+//   success                green           green           a finished bar, completed
+//   warning                amber           amber           waiting
+//   error                  red             red             failed
+//   professionalBlue       steel blue      steel blue      subagent names
+// (values of the CLI's themes; the desktop app maps the same keys to its own tokens)
 const PALETTE = {
   fill: 'claude',
-  glow: 'text', // the cell at the leading edge: near-white on dark, near-black on light
-  track: 'subtle',
+  glow: 'claudeShimmer', // the cells at the leading edge: a lighter coral
+  track: 'userMessageBackground',
+  agent: 'professionalBlue',
   text: 'text',
   muted: 'inactive',
   done: 'success',
@@ -127,28 +131,29 @@ const COLOR: Record<string, string> = {
 const FINISHED = ['completed', 'failed', 'killed']
 
 // A small icon for the kind of agent. The first rule that matches the agent's
-// lowercased "<type> <name>" wins; edit or extend the list to taste. Single
-// code point emoji only: they keep their width in every terminal font.
+// lowercased "<type> <name>" wins; edit or extend the list to taste. One-cell
+// monochrome symbols from the Basic Multilingual Plane, never colour emoji: they
+// take the colour of the status marker beside them and keep their width.
 const ICON_RULES: [RegExp, string][] = [
-  [/coordinat/, '🧭'], // coordinator
-  [/orchestrat/, '🎼'], // orchestrator
-  [/browser|web/, '🌐'], // web search and browser control; before "search" so web-researcher lands here
-  [/explor|search|find/, '🔍'], // searches the code
-  [/plan|architect/, '🔬'], // architect
-  [/design/, '📐'],
-  [/review/, '🧐'],
-  [/commit/, '📦'], // committer
-  [/check|valid|lint/, '🚦'], // check-runner
-  [/test|qa/, '🧪'],
-  [/secur|audit/, '🔒'],
-  [/research|guide|doc/, '📖'],
-  [/status|config|setup/, '🔩'],
-  [/code|coder|engineer|develop|implement|build/, '💻'], // engineer
-  [/general|worker/, '👷'], // general-purpose worker
-  [/teammate/, '🤝'],
+  [/coordinat/, '◎'], // coordinator
+  [/orchestrat/, '❖'], // orchestrator
+  [/browser|web/, '⌘'], // web search and browser control; before "search" so web-researcher lands here
+  [/explor|search|find/, '◈'], // searches the code
+  [/plan|architect/, '◇'], // architect
+  [/design/, '▧'],
+  [/review/, '◉'],
+  [/commit/, '▲'], // committer
+  [/check|valid|lint/, '▣'], // check-runner
+  [/test|qa/, '▥'],
+  [/secur|audit/, '▩'],
+  [/research|guide|doc/, '≡'],
+  [/status|config|setup/, '◍'],
+  [/code|coder|engineer|develop|implement|build/, '❯'], // engineer
+  [/general|worker/, '▪'], // general-purpose worker
+  [/teammate/, '⊕'],
 ]
-const MAIN_ICON = '🧠'
-const OTHER_ICON = '🤖'
+const MAIN_ICON = '◆'
+const OTHER_ICON = '◦'
 const kindIcon = (type: string, name: string) => {
   const text = `${type} ${name}`.toLowerCase()
   return ICON_RULES.find(([rule]) => rule.test(text))?.[1] ?? OTHER_ICON
@@ -264,6 +269,14 @@ const tally = (old: Ledger, agentId: string, b: Tok, turnId?: string): Ledger =>
     seen,
     retired: dropped.length === 0 ? l.retired : addTok(l.retired, sumUsage(dropped)),
   }
+}
+// mcp__windows-mcp__Screenshot -> Screenshot: the server's name is noise in a
+// narrow pane. Anything that is not of that shape is returned as it is.
+const shortTool = (name: string): string => {
+  if (!name.startsWith('mcp__')) return name
+  const rest = name.slice('mcp__'.length)
+  const cut = rest.indexOf('__')
+  return cut > 0 && cut + 2 < rest.length ? rest.slice(cut + 2) : name
 }
 const seconds = (ms: number) => (ms < 950 ? `${Math.max(1, Math.round(ms / 100) * 100)}ms` : `${(ms / 1000).toFixed(1)}s`)
 
@@ -617,7 +630,7 @@ const measure = (list: Todo[], rows: AgentRow[]) => {
   if (list.length > 0) {
     const done = list.filter(t => t.status === 'completed').length
     const current = list.find(t => t.status === 'in_progress')
-    return { done, total: list.length, label: current?.content ?? 'tasks' }
+    return { done, total: list.length, label: current?.content ?? (done === list.length ? 'done' : 'tasks') }
   }
   const done = rows.filter(a => FINISHED.includes(a.status)).length
   return { done, total: rows.length, label: rows.length > 0 ? 'subagents' : '' }
@@ -734,15 +747,45 @@ async function fetchPage($: EngineInterface) {
   }
 }
 
+// The plugin store keeps a 7 day window: anything older is deleted. That is the
+// saved ledgers of other sessions (by their `at`), the price list (by `fetchedAt`)
+// and the time of the last price fetch. The running session's own ledger stays,
+// whatever its age. An entry whose date cannot be read counts as old.
+const KEEP_DAYS = 7
+const KEEP_MS = KEEP_DAYS * DAY
+async function pruneStore($: EngineInterface, now: number) {
+  try {
+    const mine = `${SAVED}${await $.session.id()}`
+    for (const k of (await $.store.keys()) ?? []) {
+      if (typeof k !== 'string' || !k.startsWith(SAVED) || k === mine) continue
+      const v = await $.store.get(k)
+      const at = isObj(v) ? num(v.at, Number.MAX_SAFE_INTEGER) : 0
+      if (at === 0 || now - at > KEEP_MS) await $.store.delete(k)
+    }
+    const listed = cleanPrices(await $.store.get('prices'))
+    if (listed !== null && now - listed.fetchedAt > KEEP_MS) await $.store.delete('prices')
+    const tried = await $.store.get('pricesTriedAt')
+    if (typeof tried === 'number' && now - tried > KEEP_MS) await $.store.delete('pricesTriedAt')
+  } catch {
+    // an entry that stays one more day does no harm
+  }
+}
+
 // Load the saved prices, and fetch fresh ones when they are over a day old (a
-// failed fetch is not retried within the hour). Any failure leaves things as
-// they were: prices simply stay unknown, and no cost is shown.
+// failed fetch is not retried within the hour). Prices older than the 7 day
+// window are dropped, so a list that could not be refreshed for a week no longer
+// prices anything. Any failure leaves things as they were: prices simply stay
+// unknown, and no cost is shown.
 async function loadPrices($: EngineInterface) {
   try {
     const now = await $.clock.now()
+    await pruneStore($, now)
     const saved = cleanPrices(await $.store.get('prices'))
     if (saved !== null) {
       await update($, prices, () => saved)
+    } else {
+      const held = await read($, prices)
+      if (held !== null && now - held.fetchedAt > KEEP_MS) await update($, prices, () => null)
     }
     const triedAt = await $.store.get('pricesTriedAt')
     const tried = typeof triedAt === 'number' && Number.isFinite(triedAt) ? triedAt : 0
@@ -817,7 +860,9 @@ async function reset($: EngineInterface) {
 // the mod, a restart, or a state value the engine could not keep does not lose the
 // session's totals. Written at most every 2 s (and at the end of a turn).
 const SAVED = 'ledger:'
-const KEEP_SAVED = 8
+// The window in days is what limits saved ledgers (`pruneStore`); this count is only
+// a guard against a store that fills up faster than a week.
+const KEEP_SAVED = 50
 let savedJson = ''
 let savedAt = 0
 // The session id whose saved copy session.end has deleted: nothing is written under it
@@ -1500,8 +1545,8 @@ export const register: Register = on => {
       if (isScanning) {
         return i === head ? PALETTE.glow : i < head && i >= head - 2 ? fill : PALETTE.track
       }
-      if (i < lit - 1) return fill
-      if (i === lit - 1) return isDone || !r.isActive ? fill : PALETTE.glow
+      // the two lit cells at the edge are a lighter coral while the run is active
+      if (i < lit) return i >= lit - 2 && r.isActive && !isDone ? PALETTE.glow : fill
       return i === lit && r.isActive && !isDone && beat % 2 === 0 ? fill : PALETTE.track
     }
 
@@ -1519,25 +1564,34 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
       <Box>
+        <Text color={fill}>▌ </Text>
         {bar}
         <Text bold color={fill}>
           {' '}
           {percent.padStart(4)}
         </Text>
         <Text color={PALETTE.text}>{total === 0 ? '' : `  ${done}/${total}`}</Text>
-        <Text color={PALETTE.muted} wrap="truncate-end">
-          {' '}
-          · {elapsed}
-          {isScanning
-            ? ` · ${r.tools} tool calls · no task list`
-            : isEstimate
-              ? ` · ${r.tools} tool calls · estimated`
-              : ''}
-          {label === '' ? '' : ` · ${label}`}
-        </Text>
+        <Box flexShrink={0}>
+          <Text color={PALETTE.muted}>
+            {' '}
+            · {elapsed}
+            {isScanning
+              ? ` · ${r.tools} tool calls · no task list`
+              : isEstimate
+                ? ` · ${r.tools} tool calls · estimated`
+                : ''}
+          </Text>
+        </Box>
+        {label === '' ? null : (
+          <Text color={PALETTE.text} wrap="truncate-end">
+            {' · '}
+            {label}
+          </Text>
+        )}
       </Box>
       {hasTokens && (
         <Text color={PALETTE.muted} wrap="truncate-end">
+          <Text color={fill}>▌ </Text>
           turn {tokKids(Text, thisTurn)} · session {tokKids(Text, session)}
         </Text>
       )}
@@ -1584,6 +1638,7 @@ export const register: Register = on => {
             <Text
               {...(style.dim === true ? { dimColor: true } : {})}
               {...(style.bold === true ? { bold: true } : {})}
+              {...(style.color === undefined ? {} : { color: style.color })}
               wrap="truncate-end"
             >
               {joinSegs(l)}
@@ -1594,6 +1649,7 @@ export const register: Register = on => {
             key={`${key}${i}`}
             {...(style.dim === true ? { dimColor: true } : {})}
             {...(style.bold === true ? { bold: true } : {})}
+            {...(style.color === undefined ? {} : { color: style.color })}
             wrap="truncate-end"
           >
             {' '.repeat(markerW)}
@@ -1615,14 +1671,19 @@ export const register: Register = on => {
       for (const c of recent) {
         const mark = c.status === 'error' ? '✗' : c.status === 'done' ? '✓' : '◐'
         const tail = ` · ${c.status === 'running' ? 'running' : seconds(c.ms)}`
-        const spare = width - 4 - cells(`${mark} ${c.tool}`) - 1 - cells(tail)
+        const name = shortTool(c.tool)
+        const spare = width - 4 - cells(`${mark} ${name}`) - 1 - cells(tail)
         const hint = c.hint === '' || spare < 4 ? '' : ` ${fit(c.hint, spare)}`
+        const statusColor = c.status === 'error' ? 'error' : c.status === 'done' ? 'success' : 'claude'
         out.push(
           <Box key={c.id}>
             <Box flexShrink={0}>
-              <Text color={c.status === 'error' ? 'error' : c.status === 'done' ? 'success' : 'claude'}>
+              <Text color={statusColor}>
                 {'    '}
-                {mark} {c.tool}
+                {mark}{' '}
+                <Text color={c.status === 'done' ? PALETTE.text : statusColor} bold={c.status !== 'done'}>
+                  {name}
+                </Text>
               </Text>
             </Box>
             <Text dimColor wrap="truncate-end">
@@ -1651,7 +1712,7 @@ export const register: Register = on => {
     for (const c of mainCalls) tally.set(c.tool, (tally.get(c.tool) ?? 0) + 1)
     const tallySegs = [...tally.entries()]
       .sort((x, y) => y[1] - x[1])
-      .map(([tool, n], i) => seg(`${tool}×${n}`, i === 0 ? SEP : ' '))
+      .map(([tool, n], i) => seg(`${shortTool(tool)}×${n}`, i === 0 ? SEP : ' '))
     const failed = mainCalls.filter(c => c.status === 'error').length
     const mainShown = Math.min(SHOWN_CALLS + 1, Math.max(2, Math.floor(room / 3)))
     const mainHead = `▌ ${MAIN_ICON} Main agent`
@@ -1673,7 +1734,13 @@ export const register: Register = on => {
       ...plain('mc', costOf(MAIN), 4),
       ...plain(
         'mt',
-        [seg(`${mainCalls.length} tools${failed > 0 ? ` (${failed} failed)` : ''}`, ''), ...tallySegs],
+        [
+          seg(`${mainCalls.length} tools`, ''),
+          ...(failed > 0
+            ? [segOf(`(${failed} failed)`, <Text key="failed" color="error" bold dimColor={false}>{`(${failed} failed)`}</Text>, ' ')]
+            : []),
+          ...tallySegs,
+        ],
         4,
       ),
       ...callLines(mainCalls, mainShown),
@@ -1741,7 +1808,7 @@ export const register: Register = on => {
     // Subagents: newest first; each takes a card of a few lines, until the
     // pane is full (the history keeps its lines first).
     const blocks = []
-    let used = mainUsed + 5 + (sessionLines.length - 1) + (turnLines.length - 1) + historyUsed
+    let used = mainUsed + 6 + (sessionLines.length - 1) + (turnLines.length - 1) + historyUsed
     for (const a of [...rows].reverse()) {
       const mine = log.filter(c => c.agentId === a.id)
       const isOver = FINISHED.includes(a.status)
@@ -1759,9 +1826,20 @@ export const register: Register = on => {
           <Text color={COLOR[a.status]}>{marker}</Text>,
           cells(marker),
           head,
-          { bold: true, dim: isOver },
+          { bold: true, dim: isOver, ...(isOver ? {} : { color: PALETTE.agent }) },
         ),
-        ...plain(`${a.id}s`, [seg(a.id.slice(0, 8), ''), seg(a.status), ...setupOf(a.id)], 4),
+        ...plain(
+          `${a.id}s`,
+          [
+            seg(a.id.slice(0, 8), ''),
+            // the status word wears the status colour, like the marker beside the name
+            COLOR[a.status] === undefined
+              ? seg(a.status)
+              : segOf(a.status, <Text key="status" color={COLOR[a.status]} dimColor={false}>{a.status}</Text>),
+            ...setupOf(a.id),
+          ],
+          4,
+        ),
         ...plain(`${a.id}c`, [seg(`${mine.length} tools`, ''), ...costOf(a.id)], 4),
         ...callLines(mine, SHOWN_CALLS),
       ]
@@ -1788,16 +1866,38 @@ export const register: Register = on => {
       width,
     )
 
+    // Agents at work now: the subagents still going, and the main agent while its
+    // turn is active (it has a card of its own but is not in the subagent roster).
+    const working = running + ((await read($, run)).isActive ? 1 : 0)
+
+    // A hairline between sections instead of a blank line (the same one row).
+    // Short on purpose: in the desktop's proportional font a `─` is wider than an
+    // average character, so a rule as long as the pane's cell count would wrap.
+    // No `wrap` prop: with `truncate-end` the desktop drew every line after the
+    // rule in a monospace font.
+    const rule = (key: string) => (
+      <Text key={key} dimColor>
+        {'─'.repeat(Math.max(4, Math.min(width - 2, 22)))}
+      </Text>
+    )
+
     return (
       <Box flexDirection="column">
+        <Box>
+          <Text bold color="claude">◢ AGENTS</Text>
+          <Text color={working > 0 ? 'success' : PALETTE.muted} wrap="truncate-end">
+            {'  '}
+            {working > 0 ? '●' : '○'} {working} running
+          </Text>
+        </Box>
         <Text bold>Tokens</Text>
         <Text dimColor wrap="truncate-end">{'  '}session (all agents)</Text>
         {sessionLines}
         <Text dimColor wrap="truncate-end">{'  '}this turn</Text>
         {turnLines}
-        <Text> </Text>
+        {rule('r1')}
         {main}
-        <Text> </Text>
+        {rule('r2')}
         {draw(
           'sh',
           pack(
@@ -1823,12 +1923,12 @@ export const register: Register = on => {
         )}
         {ended.length > 0 && (
           <Box flexDirection="column">
-            <Text> </Text>
+            {rule('r3')}
             {draw('hh', historyHead, 0, { dim: false, bold: true }, 2)}
             {historyRows.map(r => r.node)}
           </Box>
         )}
-        <Text> </Text>
+        {rule('r4')}
         {draw('ft', footer, 0, {}, 2)}
       </Box>
     )
