@@ -31,6 +31,9 @@ type Env = {
   home?: string
   deny?: string
 }
+// The engine hands paths over as the host resolves them: on Windows '/p/a.jsonl' arrives as
+// a drive letter and backslashes. The tests compare POSIX paths, so both are brought to that form.
+const posix = (p: unknown) => String(p).split(String.fromCharCode(92)).join('/').replace(/^[A-Za-z]:/, '')
 // The engine's side: every event the mod listens to answers with a stub. `reads` and
 // `exists` record the paths the mod asked about.
 const harness = (on: any, opts: Env = {}) => {
@@ -62,9 +65,9 @@ const harness = (on: any, opts: Env = {}) => {
   on('classic.Stop', () => ({}))
   on('env.get', () => ({ value: opts.home ?? '/home/u' }))
   on('fs.list', () => ({ value: [{ name: '-proj', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
-  on('fs.exists', (_$: any, e: any) => (exists.push(e.path), { value: false }))
+  on('fs.exists', (_$: any, e: any) => (exists.push(posix(e.path)), { value: false }))
   on('fs.read', (_$: any, e: any) => {
-    reads.push(e.path)
+    reads.push(posix(e.path))
     return opts.deny !== undefined
       ? { deny: opts.deny }
       : opts.transcript === null || opts.transcript === undefined

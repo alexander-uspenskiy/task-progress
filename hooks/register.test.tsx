@@ -238,15 +238,6 @@ test('the pane lists a subagent with its tools, status and token usage', async (
     tool_use_id: 't1',
     agentId: 'abcdef123456',
   } as never)
-  await $.turn.complete({
-    answer: 'done',
-    durationMs: 10,
-    isAborted: false,
-    turnId: 'x',
-    reason: 'answer',
-    agentId: 'abcdef123456',
-    usage: { model: 'm', input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-  } as never)
   await clock.advance(500)
 
   const pane = await $.ui.mount({
@@ -284,6 +275,31 @@ test('the pane lists a subagent with its tools, status and token usage', async (
   const band = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)
   expect(await band.find({ type: 'Text', text: /turn 10\.2k in \(4\.0k cached\) · 1\.0k out · session 10\.2k in \(4\.0k cached\)/ })).toBeDefined()
   await band.unmount()
+
+  // the subagent's own turn ends: it is finished at once, though the engine's list still
+  // says running, and its tokens stay counted
+  await $.turn.complete({
+    answer: 'done',
+    durationMs: 10,
+    isAborted: false,
+    turnId: 'x',
+    reason: 'answer',
+    agentId: 'abcdef123456',
+    usage: { model: 'm', input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  } as never)
+  await clock.advance(500)
+  const after = await $.ui.mount({
+    plugin: 'task-progress',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'task-agents',
+    props: { title: 'Agents', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20, total: 1 }, view: {} },
+    viewport: { columns: 80, rows: 60 },
+  } as never)
+  expect(await after.find({ type: 'Text', text: /Subagents · 1 total · 0 active/ })).toBeDefined()
+  expect(await after.find({ type: 'Text', text: /^History · 1 of 1 finished/ })).toBeDefined()
+  expect(await after.find({ type: 'Text', text: /^\s*10\.2k in \(4\.0k cached\) · 1\.0k out$/ })).toBeDefined()
+  await after.unmount()
 
   await $.prompt.submit({ text: 'next' } as never)
   const fresh = await $.ui.mount({ plugin: 'task-progress', surface: 'terminal', ...BAND } as never)

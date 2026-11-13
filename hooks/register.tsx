@@ -811,6 +811,7 @@ async function reconcile($: EngineInterface, turnId: string, agentId: string, u:
 
 // Back to the start of a session (not the prices: they are the same in the next one).
 async function reset($: EngineInterface) {
+  stopped.clear()
   await update($, todos, () => [])
   await update($, calls, () => [])
   await update($, ledger, () => ({ turn: NONE, agents: [], seen: [], retired: NONE }))
@@ -838,6 +839,23 @@ let savedAt = 0
 // The session id whose saved copy session.end has deleted: nothing is written under it
 // again (a late save must not bring the key back) until a session.start. '*': whichever.
 let endedId: string | undefined
+// Subagents whose own loop has ended (a turn.complete or a stop event carrying their
+// id). The engine's agent list can still call one `running` for a moment after that, or
+// for good when nobody polls it any more, so the pane trusts the end it saw: the agent
+// shows as completed until a new request of its own says it is working again.
+const stopped = new Set<string>()
+const MAX_STOPPED = 200
+const markStopped = (id: unknown) => {
+  if (!isSafeId(id)) return
+  stopped.delete(id)
+  stopped.add(id)
+  while (stopped.size > MAX_STOPPED) {
+    for (const oldest of stopped) {
+      stopped.delete(oldest)
+      break
+    }
+  }
+}
 // per subagent: how many times its transcript was tried, and when last (the newest 200)
 const attempts = new Map<string, { n: number; at: number }>()
 const MAX_ATTEMPTS = 200
@@ -1138,7 +1156,7 @@ async function refresh($: EngineInterface) {
     label: clean(a.description, 120) || clean(a.name, 60) || clean(a.type, 60),
     name: clean(a.name, 60),
     type: clean(a.type, 60),
-    status: a.status,
+    status: stopped.has(a.id) && !FINISHED.includes(a.status) ? 'completed' : a.status,
   }))
   const now = await $.clock.now()
   await update($, agents, () => rows)
@@ -1175,9 +1193,33 @@ async function poll($: EngineInterface) {
   return r.isActive || rows.some(a => !FINISHED.includes(a.status))
 }
 
+// The poll of the band and pane data. It stops itself as soon as nothing is going on:
+// no run, and no subagent that has not finished. A turn that never reports its end
+// cannot leave it polling, and a main turn that ends while a subagent still runs hands
+// the polling over to it (see turn.complete), so the pane sees that subagent end.
+// Module level, not inside `register`: the engine only lets `$` be passed to functions
+// declared at the top of the file.
+let tick: { cancel: () => void } | undefined
+function startTick($: EngineInterface) {
+  tick?.cancel()
+  const mine = $.clock.every(TICK_MS, () => {
+    void poll($)
+      .then(isBusy => {
+        if (isBusy) return
+        mine.cancel()
+        if (tick === mine) tick = undefined
+      })
+      .catch(() => {})
+  })
+  tick = mine
+}
+// True while a subagent has not finished, by the list the last refresh read.
+async function isSubagentBusy($: EngineInterface) {
+  return (await read($, agents)).some(a => !FINISHED.includes(a.status))
+}
+
 export const register: Register = on => {
   let backfill: { cancel: () => void } | undefined
-  let tick: { cancel: () => void } | undefined
   let pricing: { cancel: () => void } | undefined
   let isLoading = false
   // Work that a stop event scheduled (see classic.Stop): cancelled when the session ends.
@@ -1298,21 +1340,7 @@ export const register: Register = on => {
     backfill = $.clock.after(0, () => {
       void backfillSeats($).catch(() => {})
     })
-    if (!isSameWork || tick === undefined) {
-      tick?.cancel()
-      // It stops itself once nothing is going on, so a turn that never reports
-      // its end cannot leave it polling; the next prompt starts it again.
-      const mine = $.clock.every(TICK_MS, () => {
-        void poll($)
-          .then(isBusy => {
-            if (isBusy) return
-            mine.cancel()
-            if (tick === mine) tick = undefined
-          })
-          .catch(() => {})
-      })
-      tick = mine
-    }
+    if (!isSameWork || tick === undefined) startTick($)
 
     return next({ ...e, context: [...(e.context ?? []), TASK_HINT] })
   }).catch(($, e, next) => next(e))
@@ -1333,6 +1361,7 @@ export const register: Register = on => {
   on('classic.SubagentStop', async ($, e, next) => {
     const id: unknown = e.agent_id
     const path: unknown = e.agent_transcript_path
+    if (isSafeId(id)) markStopped(id)
     if (isSafeId(id) && typeof path === 'string') {
       const job = $.clock.after(0, () => {
         jobs.delete(job)
@@ -1340,6 +1369,16 @@ export const register: Register = on => {
       })
       jobs.add(job)
     }
+    // the pane shows the end at once, from a timer so the event is not held up
+    const seen = $.clock.after(0, () => {
+      jobs.delete(seen)
+      void refresh($)
+        .then(async () => {
+          if (tick === undefined && (await isSubagentBusy($))) startTick($)
+        })
+        .catch(() => {})
+    })
+    jobs.add(seen)
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -1391,6 +1430,8 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     try {
       const agentId = e.agentId ?? MAIN
+      // a request of its own: the agent is working (again), whatever its last end said
+      if (e.agentId !== undefined) stopped.delete(e.agentId)
       const effort = e.effort === undefined ? '' : clean(e.effort, 20)
       const model = clean(e.model, 120)
       const known = await read($, setups)
@@ -1491,6 +1532,17 @@ export const register: Register = on => {
       await noteError($, '', err)
     }
     await saveLedger($, true)
+    // A subagent's turn ending is that subagent's end: the pane shows it at once, even if
+    // the engine's list still says running, and polling carries on while others run.
+    if (e.agentId !== undefined) {
+      try {
+        markStopped(e.agentId)
+        await refresh($)
+        if (tick === undefined && (await isSubagentBusy($))) startTick($)
+      } catch {
+        // the next poll shows it
+      }
+    }
     // Only the main loop's end ends the run; a subagent's turn also ends here.
     if (e.agentId === undefined) {
       tick?.cancel()
@@ -1503,6 +1555,11 @@ export const register: Register = on => {
         await $.store.set('history', [...history, { tools: ended.tools, seconds }].slice(-20))
       }
       await update($, run, r => ({ ...r, isActive: false }))
+      // The main agent can end its turn while a subagent it started still runs (a
+      // background one: the call returned at once and it waits for the report). Nothing
+      // else would poll the list any more, so the subagent's end would never reach the
+      // pane: keep polling until every subagent has finished (the poll then stops).
+      if (await isSubagentBusy($)) startTick($)
     }
     return next(e)
   })

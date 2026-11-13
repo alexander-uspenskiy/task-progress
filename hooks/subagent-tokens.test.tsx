@@ -25,6 +25,9 @@ const TRANSCRIPT = [
   .map(row => JSON.stringify(row))
   .join('\n')
 
+// The engine hands paths over as the host resolves them: on Windows '/p/a.jsonl' arrives as
+// a drive letter and backslashes. The tests compare POSIX paths, so both are brought to that form.
+const posix = (p: unknown) => String(p).split(String.fromCharCode(92)).join('/').replace(/^[A-Za-z]:/, '')
 const reads: string[] = []
 const harness = (on: any, opts: { store?: Record<string, unknown>; memory?: Map<string, unknown>; transcript?: string | null } = {}) => {
   on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => {
@@ -50,7 +53,7 @@ const harness = (on: any, opts: { store?: Record<string, unknown>; memory?: Map<
   on('classic.SubagentStop', () => ({}))
   on('classic.Stop', () => ({}))
   on('agent.spawn', () => ({ model: 'claude-haiku-5-5-20260101', agentId: 'h4000000aaaa' }))
-  on('fs.read', (_$: any, e: any) => (reads.push(e.path), opts.transcript === null ? { deny: 'no such file' } : { value: opts.transcript ?? TRANSCRIPT }))
+  on('fs.read', (_$: any, e: any) => (reads.push(posix(e.path)), opts.transcript === null ? { deny: 'no such file' } : { value: opts.transcript ?? TRANSCRIPT }))
   return clock
 }
 
@@ -206,7 +209,7 @@ test('a finished subagent with no tokens is found and read on its own, with no s
   const expected = '/home/u/.claude/projects/-proj/s1/subagents/agent-h5000000aaaa.jsonl'
   on('env.get', () => ({ value: '/home/u' }))
   on('fs.list', () => ({ value: [{ name: 'other', kind: 'file', size: 1, mtimeMs: 0, isLink: false }, { name: '-proj', kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }))
-  on('fs.exists', (_$: any, e: any) => ({ value: e.path === expected }))
+  on('fs.exists', (_$: any, e: any) => ({ value: posix(e.path) === expected }))
   on('agent.list', () => ({
     value: [{ id: 'h5000000aaaa', description: 'earlier job', type: 'Explore', status: 'completed' }],
   }))
