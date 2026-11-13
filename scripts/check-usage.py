@@ -23,7 +23,7 @@ is counted once even when the transcript splits it over several lines.
 import glob, json, os, re, sys, urllib.request
 
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]")
 
 def count(value):
     """A token count from the transcript: a non-negative int, 0 for anything else."""
@@ -39,7 +39,7 @@ def load_prices():
     """The same table the mod reads. Any failure -> no prices -> no cost column."""
     try:
         req = urllib.request.Request(PRICING_URL, headers={"User-Agent": "task-progress-mod (check-usage script)"})
-        md = urllib.request.urlopen(req, timeout=15).read().decode()
+        md = urllib.request.urlopen(req, timeout=15).read(400_000).decode("utf-8", errors="replace")
     except Exception:
         return {}
     rows = {}
@@ -49,13 +49,13 @@ def load_prices():
         except (AttributeError, ValueError):
             return None
     for ln in md.splitlines():
-        if not ln.startswith("| Claude"):
+        if not ln.startswith("| Claude") or len(ln) > 2000:
             continue
         c = [x.strip() for x in ln.strip().strip("|").split("|")]
         if len(c) < 6:
             continue
         try:
-            label = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", c[0])
+            label = re.sub(r"\[([^\]\[]*)\]\([^()]*\)", r"\1", c[0])
             name = re.sub(r"\([^)]*\)", "", label).strip().lower()
             name = re.sub(r"^claude\s+", "", name)
             p = [num(x) for x in c[1:6]]
@@ -70,7 +70,7 @@ def load_prices():
 
 def cost(prices, model, fresh, read, write, out):
     """Estimated USD at list price, 5-minute cache writes assumed; None without a price."""
-    mid = re.sub(r"-\d{8}$", "", re.sub(r"\[.*\]$", "", (model or "").lower()))
+    mid = re.sub(r"-\d{8}$", "", (model or "").lower().split("[", 1)[0])
     rows = prices.get(mid)
     if not rows:
         return None

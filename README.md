@@ -103,43 +103,19 @@ claude plugin update task-progress@task-progress
 
 An update only sees a release when `version` in `.claude-plugin/plugin.json` changes. To try it without installing: `claude --plugin-dir /path/to/task-progress`.
 
-### Directly from the EPAM repository (no clone)
-
-Claude Code can use a git URL as the marketplace, so there is nothing to clone by hand. The repository is private, so git must already be able to sign in to `git.epam.com` (a token with `read_repository` scope, stored by Git Credential Manager). Check that first; it asks for your credentials once if needed:
-
-```
-git ls-remote https://git.epam.com/alexander_uspensky/task-progress.git
-```
-
-Then add the repository as a marketplace and install the plugin:
-
-```
-claude plugin marketplace add https://git.epam.com/alexander_uspensky/task-progress.git
-claude plugin install task-progress@task-progress --scope user
-```
-
-Start a new `claude` session and check it with `claude plugin list` (it should show `task-progress@task-progress`, scope user, enabled). To update, refresh the marketplace and update the plugin; a new release is only seen when `version` in `.claude-plugin/plugin.json` went up:
-
-```
-claude plugin marketplace update task-progress
-claude plugin update task-progress@task-progress
-```
-
-The marketplace name is `task-progress` whichever way it was added, so if one is already registered (the GitHub one above, or a local folder), remove it first. This also uninstalls the plugin: `claude plugin marketplace remove task-progress`. The GitHub copy is not kept in step with the EPAM repository and may be behind.
-
-### From a local folder (the EPAM repository)
+### From a local folder
 
 Clone the repository, then add the folder itself as the marketplace. The path is the folder that holds `.claude-plugin/`, for example `C:/Projects/task-progress` on Windows or `~/projects/task-progress` elsewhere:
 
 ```
-git clone https://git.epam.com/alexander_uspensky/task-progress.git C:/Projects/task-progress
+git clone https://github.com/alexander-uspenskiy/task-progress.git C:/Projects/task-progress
 claude plugin marketplace add C:/Projects/task-progress
 claude plugin install task-progress@task-progress --scope user
 ```
 
-Start a new `claude` session afterwards and check it with `claude plugin list`. A folder marketplace reads the files in that folder, so to update, run `git pull` there, make sure `version` in `.claude-plugin/plugin.json` went up, and run `claude plugin update task-progress@task-progress`.
+Start a new `claude` session afterwards and check it with `claude plugin list` (it should show `task-progress@task-progress`, scope user, enabled). A folder marketplace reads the files in that folder, so to update, run `git pull` there, make sure `version` in `.claude-plugin/plugin.json` went up, and run `claude plugin update task-progress@task-progress`.
 
-If the marketplace name `task-progress` is already taken by the GitHub one, remove it first (this also uninstalls the plugin): `claude plugin marketplace remove task-progress`.
+The marketplace name is `task-progress` whichever way it was added, so if one is already registered (a different source), remove it first. This also uninstalls the plugin: `claude plugin marketplace remove task-progress`.
 
 ## Using it
 
@@ -203,9 +179,10 @@ Icons are one-cell monochrome symbols from the Basic Multilingual Plane, so they
 ## Privacy and safety
 
 - **Read-only:** the mod only observes. It never denies, rewrites or re-runs tool calls. Its one change to a prompt is the reminder described above.
-- **On screen:** tool names and a short hint of each call. The hint is redacted before it is shortened (tokens, passwords, bearer headers, well-known key shapes, URL credentials and query strings), but redaction is best effort and cannot catch every secret shape (it can also hide harmless values, such as the user:group in `docker -u 1000:1000`). Text that is not the mod's own (agent names and descriptions, task names, model strings) has control characters removed before it is drawn. Agent descriptions and task names are shown as they are. Hints are kept in the mod's state, not in the plugin store. Do not share screenshots of the pane from sessions that handle secrets.
+- **On screen:** tool names and a short hint of each call. The hint is redacted before it is shortened (tokens, passwords, bearer headers, well-known key shapes, URL credentials and query strings), but redaction is best effort and cannot catch every secret shape (it can also hide harmless values, such as the user:group in `docker -u 1000:1000`). Known gaps: a password given to a short flag that is not named like a secret (`sshpass -p value`, `mysql -pvalue`) is shown, because blanking every `-p` would also hide `mkdir -p` paths and ports. The shapes recognised include Anthropic, OpenAI-style, GitHub, GitLab, Slack, npm, PyPI, AWS, Google API and OAuth, Stripe (`sk_live_`, `sk_test_`, `rk_live_`) and JWT tokens. Text that is not the mod's own (agent names and descriptions, task names, model strings) has control characters removed before it is drawn. Agent descriptions and task names are shown as they are, except that a well-known token shape in them (the same list as for hints) is hidden. Hints are kept in the mod's state, not in the plugin store. Do not share screenshots of the pane from sessions that handle secrets.
 - **Stored** in the plugin store: `history` (tool counts and durations), `prices`, `pricesTriedAt`, and the token ledger per session (counters only). No prompts and no tool arguments are persisted there.
 - **Network:** one GET a day to Anthropic's public pricing page with a static user-agent. It carries no user data, and nothing else is sent anywhere.
+- **Hooks never break the host:** bookkeeping that runs after a tool call, a turn or a session start is wrapped so an error in it cannot fail the call or run it twice. A task list from `TodoWrite` is capped at 60 steps like the desktop plan, and a `TaskCreate` result without a task is ignored.
 - The pricing page is treated as untrusted input: only its first 400,000 characters are read, long lines are skipped, at most 200 rows are kept, and prices outside 0 to 1000 USD per million tokens are dropped.
 
 ## Check the numbers
@@ -218,7 +195,7 @@ python3 scripts/check-usage.py <session-id>   # a given session
 python3 scripts/check-usage.py --subagents    # also add subagent transcripts
 ```
 
-On macOS and Linux run it with `python3`; on Windows there is no `python3` command, so use `python scripts/check-usage.py ...` (or `py -3`). It reads transcripts as UTF-8 on every platform and finds the project folder from the working directory on all three.
+On macOS and Linux run it with `python3`; on Windows there is no `python3` command, so use `python scripts/check-usage.py ...` (or `py -3`). It reads transcripts as UTF-8 on every platform and finds the project folder from the working directory on all three. It reads at most 400,000 characters of the pricing page, skips rows over 2,000 characters, and strips control, bidi and zero-width characters from the prompt text it prints.
 
 It prints time, requests, in, cached, out, fresh input, estimated cost and the prompt text, then a session total. For the estimated cost it makes its own GET to the same pricing page; without network the cost column is left out.
 
@@ -233,3 +210,4 @@ claude plugin test .
 - `hooks/*.test.tsx`: tests (band and estimate, pane, icons, history, ledger and restore, subagent transcripts, price parsing and hostile pages, redaction, timers and `/clear`).
 - `types/index.d.ts`: the state contract (`PluginState['task-progress']`).
 - `.claude-plugin/plugin.json` and `marketplace.json`: manifest and marketplace entry. `.claude-plugin/types/` is written by the engine on every load and is git-ignored.
+- `.gitignore` keeps the engine's generated files, `docs/` (local working material such as reviews and screenshots) and `.env` (local tokens) out of the repository. Never commit a token: push with a one-off header or a credential helper, not a URL that carries it.

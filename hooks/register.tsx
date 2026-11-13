@@ -331,6 +331,9 @@ const SECRET_SHAPES = new RegExp(
     'pypi-[\\w-]{20,}',
     'AKIA[0-9A-Z]{16}',
     'AIza[\\w-]{35}',
+    'sk_(?:live|test)_[A-Za-z0-9]{10,}',
+    'rk_live_[A-Za-z0-9]{10,}',
+    'ya29\\.[\\w-]{20,}',
     // a JSON web token: header.payload.signature
     'eyJ[\\w-]{8,}\\.[\\w-]{8,}(?:\\.[\\w-]{0,500})?',
   ]
@@ -338,6 +341,10 @@ const SECRET_SHAPES = new RegExp(
     .join('|'),
   'g',
 )
+// A task subject or step name: cleaned like any other text, and a well-known token shape in it
+// is hidden. Whole-text redaction is left out on purpose: it would blank ordinary names such as
+// "Fix password: reset flow".
+const safeLabel = (text: unknown, max: number): string => clean(text, max).replace(SECRET_SHAPES, '…')
 // A value: quoted (also inside an escaped quote, as in JSON within a shell
 // string), a quote left open, or a bare word.
 const VALUE = `\\\\?"[^"]{0,200}\\\\?"|\\\\?'[^']{0,200}\\\\?'|\\\\?["'][^"']{0,300}|[^\\s"'&;|]+`
@@ -596,7 +603,7 @@ const applyPlan = (list: Todo[], input: Record<string, unknown>): Todo[] => {
       const i = next.length
       next.push({
         id: `plan-${i}`,
-        content: clean(item.content, 200) || `step ${i + 1}`,
+        content: safeLabel(item.content, 200) || `step ${i + 1}`,
         status: planStatus(item.status),
       })
     }
@@ -1153,7 +1160,7 @@ async function refresh($: EngineInterface) {
   const list = await $.agent.list()
   const rows: AgentRow[] = list.map(a => ({
     id: a.id,
-    label: clean(a.description, 120) || clean(a.name, 60) || clean(a.type, 60),
+    label: safeLabel(a.description, 120) || clean(a.name, 60) || clean(a.type, 60),
     name: clean(a.name, 60),
     type: clean(a.type, 60),
     status: stopped.has(a.id) && !FINISHED.includes(a.status) ? 'completed' : a.status,
@@ -1248,10 +1255,14 @@ export const register: Register = on => {
           isLoading = false
         })
     })
-    await $.command.register({
-      name: 'task-agents',
-      description: 'Open the agents pane (status of every agent)',
-    })
+    try {
+      await $.command.register({
+        name: 'task-agents',
+        description: 'Open the agents pane (status of every agent)',
+      })
+    } catch {
+      // without the command the pane still opens with a prompt
+    }
     return next(e)
   })
 
@@ -1464,41 +1475,57 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
     await update($, todos, () =>
-      e.todos.map((t, i) => ({ id: `todo-${i}`, content: clean(t.content, 200) || `task ${i + 1}`, status: t.status })),
+      (Array.isArray(e.todos) ? e.todos : []).slice(0, PLAN_MAX).map((t, i) => ({
+        id: `todo-${i}`,
+        content: safeLabel(t?.content, 200) || `task ${i + 1}`,
+        status: planStatus(t?.status),
+      })),
     )
     return next(e)
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined && ran.isError !== true) {
-      const { id, subject } = ran.result.task
-      await update($, todos, list => [
-        ...list.filter(t => t.id !== id),
-        { id, content: clean(subject, 200) || `task ${id}`, status: 'pending' },
-      ])
+    try {
+      if (ran.deny === undefined && ran.isError !== true) {
+        const made: unknown = (ran.result as { task?: unknown } | undefined)?.task
+        const raw = isObj(made) ? made.id : undefined
+        const id = typeof raw === 'number' ? String(raw) : typeof raw === 'string' ? clean(raw, 128) : ''
+        if (isObj(made) && id !== '') {
+          await update($, todos, list => [
+            ...list.filter(t => t.id !== id),
+            { id, content: safeLabel(made.subject, 200) || `task ${id}`, status: 'pending' },
+          ])
+        }
+      }
+    } catch {
+      // a failed note must not fail the tool call, and next(e) must not run twice
     }
     return ran
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'TaskUpdate' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined && ran.isError !== true) {
-      await update($, todos, list => {
-        if (e.status === 'deleted') {
-          return list.filter(t => t.id !== e.taskId)
-        }
-        const known = list.some(t => t.id === e.taskId)
-        const subject = e.subject === undefined ? '' : clean(e.subject, 200)
-        const base = known
-          ? list
-          : [...list, { id: e.taskId, content: subject || `task ${e.taskId}`, status: 'pending' as const }]
-        return base.map(t =>
-          t.id === e.taskId
-            ? { ...t, content: subject || t.content, status: e.status ?? t.status }
-            : t,
-        )
-      })
+    try {
+      if (ran.deny === undefined && ran.isError !== true) {
+        await update($, todos, list => {
+          if (e.status === 'deleted') {
+            return list.filter(t => t.id !== e.taskId)
+          }
+          const known = list.some(t => t.id === e.taskId)
+          const subject = e.subject === undefined ? '' : safeLabel(e.subject, 200)
+          const base = known
+            ? list
+            : [...list, { id: e.taskId, content: subject || `task ${e.taskId}`, status: 'pending' as const }]
+          return base.map(t =>
+            t.id === e.taskId
+              ? { ...t, content: subject || t.content, status: e.status ?? t.status }
+              : t,
+          )
+        })
+      }
+    } catch {
+      // a failed note must not fail the tool call, and next(e) must not run twice
     }
     return ran
   }).catch(($, e, next) => next(e))
@@ -1507,17 +1534,25 @@ export const register: Register = on => {
   // `wrap_up`; the band follows it the same way it follows TaskCreate/TaskUpdate.
   on('tool.call', { tool: PLAN_TOOL }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined && ran.isError !== true) {
-      const input: unknown = e
-      if (isObj(input)) await update($, todos, list => applyPlan(list, input))
+    try {
+      if (ran.deny === undefined && ran.isError !== true) {
+        const input: unknown = e
+        if (isObj(input)) await update($, todos, list => applyPlan(list, input))
+      }
+    } catch {
+      // a failed note must not fail the tool call, and next(e) must not run twice
     }
     return ran
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: WRAP_TOOL }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny === undefined && ran.isError !== true) {
-      await update($, todos, list => list.map(t => ({ ...t, status: 'completed' as const })))
+    try {
+      if (ran.deny === undefined && ran.isError !== true) {
+        await update($, todos, list => list.map(t => ({ ...t, status: 'completed' as const })))
+      }
+    } catch {
+      // a failed note must not fail the tool call, and next(e) must not run twice
     }
     return ran
   }).catch(($, e, next) => next(e))
@@ -1531,35 +1566,40 @@ export const register: Register = on => {
     } catch (err) {
       await noteError($, '', err)
     }
-    await saveLedger($, true)
-    // A subagent's turn ending is that subagent's end: the pane shows it at once, even if
-    // the engine's list still says running, and polling carries on while others run.
-    if (e.agentId !== undefined) {
-      try {
-        markStopped(e.agentId)
+    try {
+      await saveLedger($, true)
+      // A subagent's turn ending is that subagent's end: the pane shows it at once, even if
+      // the engine's list still says running, and polling carries on while others run.
+      if (e.agentId !== undefined) {
+        try {
+          markStopped(e.agentId)
+          await refresh($)
+          if (tick === undefined && (await isSubagentBusy($))) startTick($)
+        } catch {
+          // the next poll shows it
+        }
+      }
+      // Only the main loop's end ends the run; a subagent's turn also ends here.
+      if (e.agentId === undefined) {
+        tick?.cancel()
+        tick = undefined
         await refresh($)
-        if (tick === undefined && (await isSubagentBusy($))) startTick($)
-      } catch {
-        // the next poll shows it
+        const ended = await read($, run)
+        const seconds = Math.round((ended.now - ended.startedAt) / 1000)
+        if (ended.tools > 0 && ended.isActive) {
+          const history = cleanHistory(await $.store.get('history'))
+          await $.store.set('history', [...history, { tools: ended.tools, seconds }].slice(-20))
+        }
+        await update($, run, r => ({ ...r, isActive: false }))
+        // The main agent can end its turn while a subagent it started still runs (a
+        // background one: the call returned at once and it waits for the report). Nothing
+        // else would poll the list any more, so the subagent's end would never reach the
+        // pane: keep polling until every subagent has finished (the poll then stops).
+        if (await isSubagentBusy($)) startTick($)
       }
-    }
-    // Only the main loop's end ends the run; a subagent's turn also ends here.
-    if (e.agentId === undefined) {
-      tick?.cancel()
-      tick = undefined
-      await refresh($)
-      const ended = await read($, run)
-      const seconds = Math.round((ended.now - ended.startedAt) / 1000)
-      if (ended.tools > 0 && ended.isActive) {
-        const history = cleanHistory(await $.store.get('history'))
-        await $.store.set('history', [...history, { tools: ended.tools, seconds }].slice(-20))
-      }
-      await update($, run, r => ({ ...r, isActive: false }))
-      // The main agent can end its turn while a subagent it started still runs (a
-      // background one: the call returned at once and it waits for the report). Nothing
-      // else would poll the list any more, so the subagent's end would never reach the
-      // pane: keep polling until every subagent has finished (the poll then stops).
-      if (await isSubagentBusy($)) startTick($)
+    } catch (err) {
+      // bookkeeping must never stop the turn's own end from reaching the host
+      await noteError($, '', err).catch(() => {})
     }
     return next(e)
   })

@@ -185,6 +185,54 @@ test('task subjects are cleaned when they enter TaskCreate and TaskUpdate', asyn
   for (const t of label) expect(CONTROL.test(t)).toBe(false)
 })
 
+test('a malformed TaskCreate result does not run the tool twice or break the hook', async ($, on) => {
+  const clock = harness(on)
+  on('agent.list', () => ({ value: [] }))
+  let runs = 0
+  on('tool.call', () => {
+    runs += 1
+    return { result: {} }
+  })
+
+  await $.prompt.submit({ text: 'go' } as never)
+  await clock.advance(500)
+  // the result has no `task`: the bookkeeping is skipped, the call still runs once
+  await $.tool.call({ tool: 'TaskCreate', subject: 'plan', description: 'a' } as never)
+  expect(runs).toBe(1)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'completed' } as never)
+  expect(runs).toBe(2)
+  await $.tool.call({ tool: 'TodoWrite', todos: 'not a list' } as never)
+  expect(runs).toBe(3)
+})
+
+test('a token in a task subject is hidden and a long TodoWrite list is capped', async ($, on) => {
+  const clock = harness(on)
+  on('agent.list', () => ({ value: [] }))
+  on('tool.call', () => ({ result: { text: 'ok' } }))
+  const SECRET = ['sk', '_live_', 'abcdefghij0123456789'].join('')
+
+  await $.prompt.submit({ text: 'go' } as never)
+  await clock.advance(500)
+  await $.tool.call({
+    tool: 'TodoWrite',
+    todos: Array.from({ length: 100 }, (_, i) => ({
+      content: i === 0 ? `rotate ${SECRET} now` : `step ${i}`,
+      status: i === 0 ? 'in_progress' : 'pending',
+      activeForm: 'x',
+    })),
+  } as never)
+
+  const band = await $.ui.mount(BAND as never)
+  const bandText = await texts(band)
+  await band.unmount()
+  const all = bandText.join(' | ')
+  expect(all).not.toContain(SECRET.slice(0, 12))
+  expect(all).toMatch(/rotate … now/)
+  // 60 steps at most, none finished
+  expect(all).toMatch(/0\/60/)
+  expect(all).not.toMatch(/\/100/)
+})
+
 test('a model string full of junk is cut down to its own characters at spawn', async ($, on) => {
   const clock = harness(on)
   const id = 'z3000000aaaa'

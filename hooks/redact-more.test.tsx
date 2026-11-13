@@ -24,6 +24,10 @@ const GOOGLE = j('AI', 'za', A35)
 const JWT = j('ey', 'JhbGciOiJIUzI1NiJ9', '.', 'ey', 'JzdWIiOiIxMjM0NTY3ODkwIn0', '.', 'abcdefghijklmnop')
 const NPM = j('npm', '_', 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'.slice(0, 36))
 const PYPI = j('py', 'pi-', 'AgEIcHlwaS5vcmcCJDEyMzQ1Njc4OTAx')
+const STRIPE = j('sk', '_live_', 'abcdefghij0123456789')
+const STRIPE_TEST = j('sk', '_test_', 'abcdefghij0123456789')
+const RESTRICTED = j('rk', '_live_', 'abcdefghij0123456789')
+const GOOGLE_OAUTH = j('ya', '29.', 'a0AbCdEfGhIjKlMnOpQrStUv')
 const SLACK = j('xa', 'pp-', '1-A0123456789-0123456789012-abcdef')
 const GLPAT = j('gl', 'pat-', 'abcdefghij0123456789')
 const GHU = j('gh', 'u_', 'abcdefghijklmnopqrstuvwxyz0123456789')
@@ -65,6 +69,10 @@ const LEAKS: Case[] = [
   bash(`echo ${GLPAT}`, [GLPAT.slice(0, 12)], /^ echo … · /),
   bash(`echo ${NPM}`, [NPM.slice(0, 12)], /^ echo … · /),
   bash(`echo ${PYPI}`, [PYPI.slice(0, 12)], /^ echo … · /),
+  bash(`echo ${STRIPE}`, [STRIPE.slice(0, 12)], /^ echo … · /),
+  bash(`echo ${STRIPE_TEST}`, [STRIPE_TEST.slice(0, 12)], /^ echo … · /),
+  bash(`echo ${RESTRICTED}`, [RESTRICTED.slice(0, 12)], /^ echo … · /),
+  bash(`echo ${GOOGLE_OAUTH}`, [GOOGLE_OAUTH.slice(0, 8), GOOGLE_OAUTH.slice(8)], /^ echo … · /),
   bash(`echo ${RUN_SLASH}`, [RUN_SLASH.slice(0, 20)], /^ echo … · /),
   bash(`echo ${RUN_PLAIN}`, [RUN_PLAIN.slice(0, 20)], /^ echo … · /),
   bash(`echo ${RUN_ALPHA}`, [RUN_ALPHA.slice(0, 20)], /^ echo … · /),
